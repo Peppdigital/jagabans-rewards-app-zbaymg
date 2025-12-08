@@ -10,6 +10,7 @@ import { useColorScheme } from 'react-native';
 import { AppProvider } from '@/contexts/AppContext';
 import { AuthProvider } from '@/contexts/AuthContext';
 import Toast from '@/components/Toast';
+import { StripeProvider } from '@stripe/stripe-react-native';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -33,6 +34,10 @@ export default function RootLayout() {
     <AuthProvider>
       <AppProvider>
         <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+          <StripeProvider
+            publishableKey="pk_test_your_publishable_key"
+            merchantIdentifier="merchant.your.identifier" // iOS only
+          >
           <Stack>
             <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
             <Stack.Screen name="admin" options={{ headerShown: false }} />
@@ -124,6 +129,7 @@ export default function RootLayout() {
           </Stack>
           <StatusBar style="auto" />
           <Toast />
+          </StripeProvider>
         </ThemeProvider>
       </AppProvider>
     </AuthProvider>

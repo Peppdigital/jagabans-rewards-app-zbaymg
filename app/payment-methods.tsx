@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
@@ -17,10 +16,7 @@ import { IconSymbol } from '@/components/IconSymbol';
 import * as Haptics from 'expo-haptics';
 import Toast from '@/components/Toast';
 import { supabase } from '@/app/integrations/supabase/client';
-// import {
-//   SQIPCardEntry,
-//   SQIPCore,
-// } from 'react-native-square-in-app-payments';
+import { useStripe, CardField } from '@stripe/stripe-react-native';
 
 interface StoredCard {
   id: string;
@@ -30,17 +26,20 @@ interface StoredCard {
   expYear: number;
   cardholderName?: string;
   isDefault: boolean;
-  // squareCardId: string;
-  // squareCustomerId: string;
+  stripePaymentMethodId: string;
+  stripeCustomerId: string;
 }
 
 export default function PaymentMethodsScreen() {
   const router = useRouter();
   const { userProfile, currentColors, loadUserProfile } = useApp();
+  const { createPaymentMethod, confirmPayment } = useStripe();
   
   const [storedCards, setStoredCards] = useState<StoredCard[]>([]);
   const [loading, setLoading] = useState(false);
   const [processing, setProcessing] = useState(false);
+  const [showAddCard, setShowAddCard] = useState(false);
+  const [cardComplete, setCardComplete] = useState(false);
   const [toastVisible, setToastVisible] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
   const [toastType, setToastType] = useState<'success' | 'error' | 'info'>('success');
@@ -50,16 +49,6 @@ export default function PaymentMethodsScreen() {
     setToastMessage(message);
     setToastVisible(true);
   };
-
-  // const initializeSquare = async () => {
-  //   try {
-  //     const applicationId = 'sandbox-sq0idb-YOUR_APP_ID'; // Replace with actual app ID
-  //     await SQIPCore.setSquareApplicationId(applicationId);
-  //     console.log('Square SDK initialized successfully');
-  //   } catch (error) {
-  //     console.error('Failed to initialize Square SDK:', error);
-  //   }
-  // };
 
   const loadStoredCards = useCallback(async () => {
     if (!userProfile) return;
@@ -78,14 +67,14 @@ export default function PaymentMethodsScreen() {
       if (data && data.length > 0) {
         const cards: StoredCard[] = data.map((card: any) => ({
           id: card.id,
-          cardBrand: card.type,
-          last4: card.card_number.slice(-4),
-          expMonth: card.expiry_date.slice(0, 2),
-          expYear: card.expiry_date.slice(2, 4),
+          cardBrand: card.brand || card.type,
+          last4: card.last4 || card.card_number?.slice(-4),
+          expMonth: card.exp_month || parseInt(card.expiry_date?.slice(0, 2)),
+          expYear: card.exp_year || parseInt(card.expiry_date?.slice(2, 4)),
           cardholderName: card.cardholder_name,
           isDefault: card.is_default,
-          // squareCardId: card.square_card_id,
-          // squareCustomerId: card.square_customer_id,
+          stripePaymentMethodId: card.stripe_payment_method_id,
+          stripeCustomerId: card.stripe_customer_id,
         }));
         
         setStoredCards(cards);
@@ -103,113 +92,202 @@ export default function PaymentMethodsScreen() {
   useEffect(() => {
     if (userProfile) {
       loadStoredCards();
-      // initializeSquare();
     }
   }, [userProfile, loadStoredCards]);
 
-  // const handleAddCard = async () => {
-  //   try {
-  //     setProcessing(true);
-      
-  //     await SQIPCardEntry.startCardEntryFlow(
-  //       {
-  //         collectPostalCode: true,
-  //         skipCardHolderName: false,
-  //       },
-  //       async (cardDetails) => {
-  //         console.log('Card nonce received:', cardDetails.nonce);
-          
-  //         // Here you would typically make a small charge or create a customer
-  //         // For now, we'll show a message that the card needs to be added during checkout
-  //         showToast('info', 'Please add your card during checkout to save it for future use.');
-  //         setProcessing(false);
-  //       },
-  //       (error) => {
-  //         console.error('Card entry error:', error);
-  //         showToast('error', error.message || 'Failed to capture card information');
-  //         setProcessing(false);
-  //       },
-  //       () => {
-  //         console.log('Card entry cancelled');
-  //         setProcessing(false);
-  //       }
-  //     );
-  //   } catch (error) {
-  //     console.error('Failed to start card entry:', error);
-  //     showToast('error', 'Failed to open card entry form');
-  //     setProcessing(false);
-  //   }
-  // };
+  const getOrCreateStripeCustomer = async () => {
+    try {
+      // Check if user already has a Stripe customer ID
+      const { data: existingCard } = await supabase
+        .from('payment_methods')
+        .select('stripe_customer_id')
+        .eq('user_id', userProfile!.id)
+        .limit(1)
+        .single();
 
-  // const handleSetDefault = async (cardId: string) => {
-  //   if (Platform.OS !== 'web') {
-  //     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-  //   }
+      if (existingCard?.stripe_customer_id) {
+        return existingCard.stripe_customer_id;
+      }
 
-  //   try {
-  //     setProcessing(true);
+      // Create new Stripe customer
+      const { data, error } = await supabase.functions.invoke('create-stripe-customer', {
+        body: {
+          userId: userProfile!.id,
+          email: userProfile!.email,
+          name: userProfile!.name,
+        },
+      });
 
-  //     // Update all cards to not be default
-  //     await supabase
-  //       .from('square_cards')
-  //       .update({ is_default: false })
-  //       .eq('user_id', userProfile!.id);
+      if (error) throw error;
+      return data.customerId;
+    } catch (error) {
+      console.error('Error getting Stripe customer:', error);
+      throw error;
+    }
+  };
 
-  //     // Set the selected card as default
-  //     const { error } = await supabase
-  //       .from('square_cards')
-  //       .update({ is_default: true })
-  //       .eq('id', cardId);
+  const handleAddCard = async () => {
+    if (!cardComplete) {
+      showToast('error', 'Please enter complete card details');
+      return;
+    }
 
-  //     if (error) throw error;
+    try {
+      setProcessing(true);
 
-  //     showToast('success', 'Default card updated successfully');
-  //     await loadStoredCards();
-  //   } catch (error) {
-  //     console.error('Error setting default card:', error);
-  //     showToast('error', 'Failed to update default card');
-  //   } finally {
-  //     setProcessing(false);
-  //   }
-  // };
+      // Create payment method with Stripe
+      const { paymentMethod, error: pmError } = await createPaymentMethod({
+        paymentMethodType: 'Card',
+      });
 
-  // const handleRemoveCard = (cardId: string) => {
-  //   if (Platform.OS !== 'web') {
-  //     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-  //   }
+      if (pmError) {
+        throw new Error(pmError.message);
+      }
 
-  //   Alert.alert(
-  //     'Remove Payment Method',
-  //     'Are you sure you want to remove this payment method?',
-  //     [
-  //       { text: 'Cancel', style: 'cancel' },
-  //       {
-  //         text: 'Remove',
-  //         style: 'destructive',
-  //         onPress: async () => {
-  //           try {
-  //             setProcessing(true);
+      if (!paymentMethod) {
+        throw new Error('Failed to create payment method');
+      }
 
-  //             const { error } = await supabase
-  //               .from('square_cards')
-  //               .delete()
-  //               .eq('id', cardId);
+      // Get or create Stripe customer
+      const customerId = await getOrCreateStripeCustomer();
 
-  //             if (error) throw error;
+      // Save payment method to Stripe customer
+      const { data: saveData, error: saveError } = await supabase.functions.invoke(
+        'save-payment-method',
+        {
+          body: {
+            paymentMethodId: paymentMethod.id,
+            customerId,
+            userId: userProfile!.id,
+            setAsDefault: storedCards.length === 0, // First card is default
+          },
+        }
+      );
 
-  //             showToast('success', 'Payment method removed successfully');
-  //             await loadStoredCards();
-  //           } catch (error) {
-  //             console.error('Error removing card:', error);
-  //             showToast('error', 'Failed to remove payment method');
-  //           } finally {
-  //             setProcessing(false);
-  //           }
-  //         },
-  //       },
-  //     ]
-  //   );
-  // };
+      if (saveError) throw saveError;
+
+      // Save to local database
+      const { error: dbError } = await supabase
+        .from('payment_methods')
+        .insert({
+          user_id: userProfile!.id,
+          type: 'credit',
+          stripe_payment_method_id: paymentMethod.id,
+          stripe_customer_id: customerId,
+          last4: paymentMethod.Card?.last4,
+          brand: paymentMethod.Card?.brand,
+          exp_month: paymentMethod.Card?.expMonth,
+          exp_year: paymentMethod.Card?.expYear,
+          card_number: `****${paymentMethod.Card?.last4}`,
+          cardholder_name: userProfile!.name,
+          expiry_date: `${paymentMethod.Card?.expMonth?.toString().padStart(2, '0')}${paymentMethod.Card?.expYear?.toString().slice(-2)}`,
+          is_default: storedCards.length === 0,
+        });
+
+      if (dbError) throw dbError;
+
+      showToast('success', 'Card added successfully');
+      setShowAddCard(false);
+      await loadStoredCards();
+    } catch (error: any) {
+      console.error('Error adding card:', error);
+      showToast('error', error.message || 'Failed to add card');
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const handleSetDefault = async (cardId: string) => {
+    if (Platform.OS !== 'web') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+
+    try {
+      setProcessing(true);
+
+      const card = storedCards.find(c => c.id === cardId);
+      if (!card) throw new Error('Card not found');
+
+      // Update Stripe default
+      await supabase.functions.invoke('update-default-payment-method', {
+        body: {
+          customerId: card.stripeCustomerId,
+          paymentMethodId: card.stripePaymentMethodId,
+        },
+      });
+
+      // Update all cards to not be default
+      await supabase
+        .from('payment_methods')
+        .update({ is_default: false })
+        .eq('user_id', userProfile!.id);
+
+      // Set the selected card as default
+      const { error } = await supabase
+        .from('payment_methods')
+        .update({ is_default: true })
+        .eq('id', cardId);
+
+      if (error) throw error;
+
+      showToast('success', 'Default card updated successfully');
+      await loadStoredCards();
+    } catch (error) {
+      console.error('Error setting default card:', error);
+      showToast('error', 'Failed to update default card');
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const handleRemoveCard = (cardId: string) => {
+    if (Platform.OS !== 'web') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    }
+
+    Alert.alert(
+      'Remove Payment Method',
+      'Are you sure you want to remove this payment method?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              setProcessing(true);
+
+              const card = storedCards.find(c => c.id === cardId);
+              if (card) {
+                // Detach from Stripe
+                await supabase.functions.invoke('detach-payment-method', {
+                  body: {
+                    paymentMethodId: card.stripePaymentMethodId,
+                  },
+                });
+              }
+
+              // Remove from database
+              const { error } = await supabase
+                .from('payment_methods')
+                .delete()
+                .eq('id', cardId);
+
+              if (error) throw error;
+
+              showToast('success', 'Payment method removed successfully');
+              await loadStoredCards();
+            } catch (error) {
+              console.error('Error removing card:', error);
+              showToast('error', 'Failed to remove payment method');
+            } finally {
+              setProcessing(false);
+            }
+          },
+        },
+      ]
+    );
+  };
 
   const getCardBrandIcon = (brand: string) => {
     const brandLower = brand.toLowerCase();
@@ -375,6 +453,42 @@ export default function PaymentMethodsScreen() {
     securityNoteText: {
       fontSize: 14,
     },
+    cardFieldContainer: {
+      marginBottom: 20,
+      padding: 20,
+      borderRadius: 16,
+    },
+    cardFieldLabel: {
+      fontSize: 16,
+      fontWeight: '600',
+      marginBottom: 12,
+    },
+    cardField: {
+      width: '100%',
+      height: 50,
+    },
+    addCardButtons: {
+      flexDirection: 'row',
+      gap: 12,
+      marginBottom: 20,
+    },
+    cancelButton: {
+      flex: 1,
+      borderRadius: 12,
+      padding: 16,
+      alignItems: 'center',
+      borderWidth: 1,
+    },
+    saveButton: {
+      flex: 1,
+      borderRadius: 12,
+      padding: 16,
+      alignItems: 'center',
+    },
+    buttonText: {
+      fontSize: 16,
+      fontWeight: '600',
+    },
   });
 
   return (
@@ -401,12 +515,14 @@ export default function PaymentMethodsScreen() {
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
         >
-          <View style={[styles.infoCard, { backgroundColor: currentColors.highlight + '20' }]}>
-            <IconSymbol name="info" size={20} color={currentColors.primary} />
-            <Text style={[styles.infoText, { color: currentColors.text }]}>
-              Cards are securely saved during checkout. Add items to your cart and complete a purchase to save a new card.
-            </Text>
-          </View>
+          {!showAddCard && (
+            <View style={[styles.infoCard, { backgroundColor: currentColors.highlight + '20' }]}>
+              <IconSymbol name="info" size={20} color={currentColors.primary} />
+              <Text style={[styles.infoText, { color: currentColors.text }]}>
+                Your payment methods are securely stored with Stripe. Card details are encrypted and never stored on our servers.
+              </Text>
+            </View>
+          )}
 
           {loading ? (
             <View style={styles.loadingContainer}>
@@ -415,12 +531,64 @@ export default function PaymentMethodsScreen() {
                 Loading saved cards...
               </Text>
             </View>
+          ) : showAddCard ? (
+            <>
+              <View style={[styles.cardFieldContainer, { backgroundColor: currentColors.card }]}>
+                <Text style={[styles.cardFieldLabel, { color: currentColors.text }]}>
+                  Card Details
+                </Text>
+                <CardField
+                  postalCodeEnabled={true}
+                  placeholders={{
+                    number: '4242 4242 4242 4242',
+                  }}
+                  cardStyle={{
+                    backgroundColor: currentColors.background,
+                    textColor: currentColors.text,
+                  }}
+                  style={styles.cardField}
+                  onCardChange={(cardDetails) => {
+                    setCardComplete(cardDetails.complete);
+                  }}
+                />
+              </View>
+
+              <View style={styles.addCardButtons}>
+                <Pressable
+                  onPress={() => setShowAddCard(false)}
+                  style={[styles.cancelButton, { borderColor: currentColors.border }]}
+                  disabled={processing}
+                >
+                  <Text style={[styles.buttonText, { color: currentColors.text }]}>
+                    Cancel
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={handleAddCard}
+                  style={[styles.saveButton, { 
+                    backgroundColor: cardComplete ? currentColors.primary : currentColors.border,
+                    opacity: processing ? 0.6 : 1,
+                  }]}
+                  disabled={!cardComplete || processing}
+                >
+                  {processing ? (
+                    <ActivityIndicator color={currentColors.card} />
+                  ) : (
+                    <Text style={[styles.buttonText, { color: currentColors.card }]}>
+                      Save Card
+                    </Text>
+                  )}
+                </Pressable>
+              </View>
+            </>
           ) : storedCards.length === 0 ? (
             <View style={styles.emptyState}>
               <IconSymbol name="creditcard" size={64} color={currentColors.textSecondary} />
-              <Text style={[styles.emptyStateTitle, { color: currentColors.text }]}>No Payment Methods</Text>
+              <Text style={[styles.emptyStateTitle, { color: currentColors.text }]}>
+                No Payment Methods
+              </Text>
               <Text style={[styles.emptyStateText, { color: currentColors.textSecondary }]}>
-                You haven&apos;t saved any payment methods yet. Complete a purchase and choose to save your card for faster checkout next time.
+                Add a payment method to make checkout faster and easier.
               </Text>
             </View>
           ) : (
@@ -439,14 +607,16 @@ export default function PaymentMethodsScreen() {
                         </Text>
                       )}
                       <Text style={[styles.cardExpiry, { color: currentColors.textSecondary }]}>
-                        Expires {card.expMonth}/{card.expYear}
+                        Expires {String(card.expMonth).padStart(2, '0')}/{card.expYear}
                       </Text>
                     </View>
                   </View>
                   <View style={styles.cardActions}>
                     {card.isDefault ? (
                       <View style={[styles.defaultBadge, { backgroundColor: currentColors.primary }]}>
-                        <Text style={[styles.defaultBadgeText, { color: currentColors.card }]}>Default</Text>
+                        <Text style={[styles.defaultBadgeText, { color: currentColors.card }]}>
+                          Default
+                        </Text>
                       </View>
                     ) : (
                       <Pressable
@@ -472,10 +642,27 @@ export default function PaymentMethodsScreen() {
             </View>
           )}
 
+          {!showAddCard && !loading && (
+            <Pressable
+              onPress={() => {
+                if (Platform.OS !== 'web') {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                }
+                setShowAddCard(true);
+              }}
+              style={[styles.addNewButton, { backgroundColor: currentColors.primary }]}
+            >
+              <IconSymbol name="plus" size={24} color={currentColors.card} />
+              <Text style={[styles.addNewButtonText, { color: currentColors.card }]}>
+                Add New Card
+              </Text>
+            </Pressable>
+          )}
+
           <View style={styles.securityNote}>
             <IconSymbol name="lock.fill" size={20} color={currentColors.textSecondary} />
             <Text style={[styles.securityNoteText, { color: currentColors.textSecondary }]}>
-              Your payment information is encrypted and secure
+              Secured by Stripe • PCI DSS compliant
             </Text>
           </View>
         </ScrollView>
