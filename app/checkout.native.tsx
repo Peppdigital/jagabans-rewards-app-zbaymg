@@ -325,7 +325,7 @@ function CheckoutContent() {
   // ============================================================================
   // STRIPE PAYMENT INITIALIZATION (STEPS 2 & 3)
   // ============================================================================
-
+  
   const initializePaymentSheet = useCallback(async (orderId: string) => {
   try {
     console.log('Initializing Stripe Payment Sheet for order:', orderId);
@@ -374,20 +374,41 @@ function CheckoutContent() {
     console.log('Order updated with payment_id:', paymentId);
 
     // Initialize payment sheet
+    // const { error } = await initPaymentSheet({
+    //   merchantDisplayName: 'Jagabans LA',
+    //   paymentIntentClientSecret: clientSecret,
+    //   defaultBillingDetails: {
+    //     name: userProfile?.name,
+    //     email: userProfile?.email,
+    //   },
+    //   allowsDelayedPaymentMethods: false,
+    //   returnURL: 'jagabansla://checkout',
+    //   billingDetailsCollectionConfiguration: {
+    //     name: PaymentSheet.CollectionMode.ALWAYS,
+    //     email: PaymentSheet.CollectionMode.ALWAYS,
+    //     phone: PaymentSheet.CollectionMode.NEVER,
+    //   },
+    // });
+
     const { error } = await initPaymentSheet({
       merchantDisplayName: 'Jagabans LA',
+      // customerId: customerData.customer,
+      // customerEphemeralKeySecret: customerData.ephemeralKey,
       paymentIntentClientSecret: clientSecret,
+      allowsDelayedPaymentMethods: false,
       defaultBillingDetails: {
         name: userProfile?.name,
         email: userProfile?.email,
       },
-      allowsDelayedPaymentMethods: false,
-      returnURL: 'jagabansla://checkout',
-      billingDetailsCollectionConfiguration: {
-        name: PaymentSheet.CollectionMode.ALWAYS,
-        email: PaymentSheet.CollectionMode.ALWAYS,
-        phone: PaymentSheet.CollectionMode.NEVER,
+      applePay: {
+        merchantCountryCode: 'US',
       },
+      googlePay: {
+        merchantCountryCode: 'US',
+        testEnv: __DEV__,
+      },
+      returnURL: 'jagabansla://checkout',
+      paymentMethodTypes: ['card', 'applePay', 'googlePay', 'cashApp'],
     });
 
     if (error) {
