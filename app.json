@@ -2,7 +2,7 @@
   "expo": {
     "name": "Ooosum Foods LLC",
     "slug": "ooosum-foods-llc",
-    "version": "1.3.7",
+    "version": "1.3.8",
     "orientation": "portrait",
     "icon": "./assets/images/jagabans-circle.png",
     "userInterfaceStyle": "automatic",
@@ -57,5 +57,5 @@
       }
     }
   },
-  "scheme": "Ooosum Foods LLC"
+  // "scheme": "jagabansla"
 }

@@ -513,7 +513,7 @@ function CheckoutContent() {
       const { clientSecret, ephemeralKey, paymentIntentId, customerId } = paymentData;
 
       // Step 2: Configure Payment Sheet
-      const returnURL = Linking.createURL('/checkout');
+      const returnURL = Linking.createURL('checkout');
       console.log('Return URL:', returnURL);
 
       const initConfig: any = {
