@@ -46,16 +46,65 @@ interface AddressValidationResult {
 type OrderType = 'delivery' | 'pickup';
 
 interface Order {
-  id: string;
-  user_id: string;
-  total: number;
+  id: string; // uuid
+  user_id: string | null;
+
+  total: number; // numeric(10,2) → number in TS
   points_earned: number;
-  status: string;
-  payment_status: string;
+
+  status:
+    | 'pending'
+    | 'preparing'
+    | 'ready'
+    | 'completed'
+    | 'cancelled';
+
+  payment_status:
+    | 'pending'
+    | 'processing'
+    | 'succeeded'
+    | 'failed'
+    | 'canceled'
+    | null;
+
+  payment_id: string | null;
+
+  order_number: number;
+
+  full_name: string | null;
+
   delivery_address: string | null;
   pickup_notes: string | null;
-  created_at?: string;
-  updated_at?: string;
+
+  delivery_provider: string | null;
+  delivery_triggered_at: string | null;
+  cancellation_deadline: string | null;
+
+  // Uber
+  uber_delivery_id: string | null;
+  uber_delivery_status: string | null;
+  uber_tracking_url: string | null;
+  uber_courier_name: string | null;
+  uber_courier_phone: string | null;
+  uber_courier_location: Record<string, unknown> | null;
+  uber_delivery_eta: string | null;
+  uber_proof_of_delivery: Record<string, unknown> | null;
+
+  // DoorDash
+  doordash_delivery_id: string | null;
+  doordash_delivery_status: string | null;
+  doordash_tracking_url: string | null;
+  doordash_dasher_name: string | null;
+  doordash_dasher_phone: string | null;
+  doordash_dasher_location: Record<string, unknown> | null;
+  doordash_delivery_eta: string | null;
+  doordash_proof_of_delivery: Record<string, unknown> | null;
+
+  read: boolean | null;
+  read_at: string | null;
+
+  created_at: string;
+  updated_at: string;
 }
 
 interface StripePayment {
@@ -393,7 +442,7 @@ function CheckoutContent() {
         pickup_notes: orderType === 'pickup' ? pickupNotes : null,
       })
       .select()
-      .single();
+      .single<Order>();
 
     if (orderError || !order) {
       console.error('Error creating order:', orderError);
@@ -499,113 +548,150 @@ function CheckoutContent() {
     await proceedWithPayment();
   }, [orderType, deliveryAddress, addressTouched, addressValidation, showToast]);
 
-  const proceedWithPayment = useCallback(async () => {
-    setProcessing(true);
+const proceedWithPayment = useCallback(async () => {
+  setProcessing(true);
 
-    try {
-      // Step 1: Initialize Payment Sheet and get payment intent
-      const paymentData = await initializePaymentSheet();
-      
-      if (!paymentData) {
-        throw new Error('Failed to initialize payment');
-      }
-
-      const { clientSecret, ephemeralKey, paymentIntentId, customerId } = paymentData;
-
-      // Step 2: Configure Payment Sheet
-      const returnURL = Linking.createURL('checkout');
-      console.log('Return URL:', returnURL);
-
-      const initConfig: any = {
-        merchantDisplayName: 'Jagabans LA',
-        paymentIntentClientSecret: clientSecret,
-        allowsDelayedPaymentMethods: false,
-        returnURL: returnURL,
-        defaultBillingDetails: {
-          name: userProfile?.name,
-          email: userProfile?.email,
-        },
-        customerId: customerId,
-        customerEphemeralKeySecret: ephemeralKey,
-        // Enable Apple Pay and Google Pay
-        // applePay: {
-        //   merchantCountryCode: 'US',
-        //   merchantIdentifier: 'merchant.com.ooosumfoods.jagabansla',
-        // },
-        googlePay: {
-          merchantCountryCode: 'US',
-          testEnv: false,
-          currencyCode: 'usd',
-        },
-      };
-
-      // CRITICAL FIX: Only add customer and ephemeral key if both are present
-      if (customerId && ephemeralKey) {
-        console.log('✓ Adding customer and ephemeral key to Payment Sheet config');
-        initConfig.customerId = customerId;
-        initConfig.customerEphemeralKeySecret = ephemeralKey;
-      } else {
-        console.warn('⚠️ Customer ID or ephemeral key missing - saved cards will not be available');
-        console.warn('Customer ID:', customerId);
-        console.warn('Ephemeral key:', ephemeralKey ? 'present' : 'missing');
-      }
-
-      const { error: initError } = await initPaymentSheet(initConfig);
-
-      if (initError) {
-        console.error('Error initializing payment sheet:', initError);
-        throw new Error(initError.message);
-      }
-
-      console.log('✓ Payment Sheet initialized successfully');
-
-      // Step 3: Present Payment Sheet
-      console.log('Presenting Payment Sheet...');
-      const { error: presentError } = await presentPaymentSheet();
-
-      if (presentError) {
-        if (presentError.code === 'Canceled') {
-          console.log('Payment cancelled by user');
-          showToast('info', 'Payment cancelled');
-          setProcessing(false);
-          return;
-        }
-        console.error('Payment sheet error:', presentError);
-        throw new Error(presentError.message);
-      }
-
-      console.log('✓ Payment completed successfully');
-      showToast('success', 'Payment successful!');
-
-      // Step 4: Create order AFTER successful payment
-      const orderId = await createOrderAfterPayment(paymentIntentId);
-      
-      console.log('✓ Order created successfully:', orderId);
-
-      // Step 5: Clear cart and reload profile
-      clearCart();
-      await loadUserProfile();
-
-      // Step 6: Navigate to confirmation
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      
-      setTimeout(() => {
-        setProcessing(false);
-        router.push({
-          pathname: '/order-confirmation',
-          params: { orderId },
-        });
-      }, 100);
-
-    } catch (error) {
-      console.error('Order placement error:', error);
-      const errorMessage = error instanceof Error 
-        ? error.message 
-        : 'Failed to place order. Please try again.';
-      showToast('error', errorMessage);
-      setProcessing(false);
+  try {
+    // Step 1: Initialize Payment Sheet and get payment intent
+    const paymentData = await initializePaymentSheet();
+    
+    if (!paymentData) {
+      throw new Error('Failed to initialize payment');
     }
-  }, [initializePaymentSheet, initPaymentSheet, presentPaymentSheet, createOrderAfterPayment, clearCart, loadUserProfile, router, showToast, userProfile]);
+
+    const { clientSecret, ephemeralKey, paymentIntentId, customerId } = paymentData;
+
+    // Step 2: Configure Payment Sheet
+    const returnURL = Linking.createURL('checkout');
+    console.log('Return URL:', returnURL);
+
+    const initConfig: any = {
+      merchantDisplayName: 'Jagabans LA',
+      paymentIntentClientSecret: clientSecret,
+      allowsDelayedPaymentMethods: false,
+      returnURL: returnURL,
+      defaultBillingDetails: {
+        name: userProfile?.name,
+        email: userProfile?.email,
+      },
+      googlePay: {
+        merchantCountryCode: 'US',
+        testEnv: false,
+        currencyCode: 'usd',
+      },
+    };
+
+    // Add customer and ephemeral key if both are present
+    if (customerId && ephemeralKey) {
+      console.log('✓ Adding customer and ephemeral key to Payment Sheet config');
+      initConfig.customerId = customerId;
+      initConfig.customerEphemeralKeySecret = ephemeralKey;
+    }
+
+    const { error: initError } = await initPaymentSheet(initConfig);
+
+    if (initError) {
+      console.error('Error initializing payment sheet:', initError);
+      throw new Error(initError.message);
+    }
+
+    console.log('✓ Payment Sheet initialized successfully');
+
+    // Step 3: Present Payment Sheet
+    console.log('Presenting Payment Sheet...');
+    const { error: presentError } = await presentPaymentSheet();
+
+    if (presentError) {
+      if (presentError.code === 'Canceled') {
+        console.log('Payment cancelled by user');
+        showToast('info', 'Payment cancelled');
+        setProcessing(false);
+        return;
+      }
+      console.error('Payment sheet error:', presentError);
+      throw new Error(presentError.message);
+    }
+
+    console.log('✓ Payment completed successfully');
+    showToast('success', 'Payment successful! Creating your order...');
+
+    // Step 4: Wait for webhook to create order (poll for order)
+    const orderId = await waitForOrderCreation(paymentIntentId);
+    
+    if (!orderId) {
+      throw new Error('Order creation timed out. Please contact support with payment ID: ' + paymentIntentId);
+    }
+
+    console.log('✓ Order confirmed:', orderId);
+
+    // Step 5: Clear cart and reload profile
+    clearCart();
+    await loadUserProfile();
+
+    // Step 6: Navigate to confirmation
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    
+    setTimeout(() => {
+      setProcessing(false);
+      router.push({
+        pathname: '/order-confirmation',
+        params: { orderId },
+      });
+    }, 100);
+
+  } catch (error) {
+    console.error('Order placement error:', error);
+    const errorMessage = error instanceof Error 
+      ? error.message 
+      : 'Failed to place order. Please try again.';
+    showToast('error', errorMessage);
+    setProcessing(false);
+  }
+}, [initializePaymentSheet, initPaymentSheet, presentPaymentSheet, clearCart, loadUserProfile, router, showToast, userProfile]);
+
+const waitForOrderCreation = useCallback(async (paymentIntentId: string): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      channel.unsubscribe();
+      reject(new Error('Order creation timed out'));
+    }, 30000); // 30 second timeout
+
+    // Subscribe to orders table for this payment
+    const channel = supabase
+      .channel('order-creation')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'orders',
+          filter: `payment_id=eq.${paymentIntentId}`,
+        },
+        (payload) => {
+          console.log('✓ Order created via webhook:', payload.new.id);
+          clearTimeout(timeout);
+          channel.unsubscribe();
+          resolve(payload.new.id);
+        }
+      )
+      .subscribe();
+
+    // Also check if order already exists (in case webhook was faster)
+    supabase
+      .from('orders')
+      .select('id')
+      .eq('payment_id', paymentIntentId)
+      .maybeSingle<Order>()
+      .then(({ data: order }) => {
+        if (order) {
+          console.log('✓ Order already exists:', order.id);
+          clearTimeout(timeout);
+          channel.unsubscribe();
+          resolve(order.id);
+        }
+      });
+  });
+}, []);
 
   // ============================================================================
   // EFFECTS
