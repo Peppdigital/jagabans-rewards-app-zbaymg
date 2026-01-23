@@ -58,7 +58,9 @@ interface Order {
     | 'ready'
     | 'completed'
     | 'cancelled';
-
+    order_type:
+    | 'pickup'
+    | 'delivery';
   payment_status:
     | 'pending'
     | 'processing'
@@ -320,186 +322,219 @@ function CheckoutContent() {
   // STRIPE PAYMENT SHEET INITIALIZATION
   // ============================================================================
 
-  const initializePaymentSheet = useCallback(async () => {
-    try {
-      if (!userProfile) throw new Error('User profile not found');
+  // ============================================================================
+// PAYMENT SHEET INITIALIZATION (with all order data in metadata)
+// ============================================================================
 
-      console.log('Initializing Stripe Payment Sheet...');
+const initializePaymentSheet = useCallback(async () => {
+  try {
+    if (!userProfile) throw new Error('User profile not found');
 
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error('Not authenticated');
+    console.log('Initializing Stripe Payment Sheet...');
 
-      // Get the current user
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error('User not found');
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) throw new Error('Not authenticated');
 
-      console.log('Current user ID:', user.id);
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) throw new Error('User not found');
 
-      // Get or create Stripe customer - FIXED: Use auth.users id, not profile id
-      const { data: customerData, error: customerError } = await supabase
-        .from('user_profiles')
-        .select('stripe_customer_id')
-        .eq('user_id', user.id)
-        .single();
+    console.log('Current user ID:', user.id);
 
-      if (customerError) {
-        console.error('Error fetching customer data:', customerError);
-      }
+    // Get or create Stripe customer
+    const { data: customerData, error: customerError } = await supabase
+      .from('user_profiles')
+      .select('stripe_customer_id')
+      .eq('user_id', user.id)
+      .single();
 
-      let customerId = customerData?.stripe_customer_id;
-      console.log('Existing Stripe customer ID:', customerId);
+    if (customerError) {
+      console.error('Error fetching customer data:', customerError);
+    }
 
-      // If no customer ID exists, create one
-      if (!customerId) {
-        console.log('Creating Stripe customer...');
-        const createCustomerResponse = await fetch(`${SUPABASE_URL}/functions/v1/create-stripe-customer`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${session.access_token}`,
-          },
-          body: JSON.stringify({
-            email: userProfile?.email || user.email,
-            name: userProfile?.name,
-          }),
-        });
+    let customerId = customerData?.stripe_customer_id;
 
-        if (!createCustomerResponse.ok) {
-          const errorText = await createCustomerResponse.text();
-          console.error('Failed to create Stripe customer:', errorText);
-          throw new Error('Failed to create Stripe customer');
-        }
-
-        const { customerId: newCustomerId } = await createCustomerResponse.json();
-        customerId = newCustomerId;
-        console.log('Stripe customer created:', customerId);
-      }
-
-      // Create payment intent with setup for future usage
-      console.log('Creating payment intent with customer:', customerId);
-      console.log('Amount:', Math.round(total * 100), 'cents');
-      
-      const response = await fetch(`${SUPABASE_URL}/functions/v1/create-payment-intent`, {
+    if (!customerId) {
+      console.log('Creating Stripe customer...');
+      const createCustomerResponse = await fetch(`${SUPABASE_URL}/functions/v1/create-stripe-customer`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${session.access_token}`,
         },
         body: JSON.stringify({
-          amount: Math.round(total * 100), // Convert to cents
-          currency: 'usd',
-          customerId,
-          setupFutureUsage: 'off_session', // Allow saving payment method
-          metadata: {
-            orderType,
-            itemCount: cart.length,
-            userId: user.id,
-          },
+          email: userProfile?.email || user.email,
+          name: userProfile?.name,
         }),
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error('Error creating payment intent:', errorText);
-        throw new Error('Failed to create payment intent');
+      if (!createCustomerResponse.ok) {
+        const errorText = await createCustomerResponse.text();
+        console.error('Failed to create Stripe customer:', errorText);
+        throw new Error('Failed to create Stripe customer');
       }
 
-      const { clientSecret, ephemeralKey, paymentIntentId, customerId: returnedCustomerId } = await response.json();
-      console.log('Payment intent created:', paymentIntentId);
-      console.log('Ephemeral key received:', ephemeralKey ? 'Yes' : 'No');
-      console.log('Customer ID from response:', returnedCustomerId);
-
-      // Store payment intent ID for later order creation
-      return { clientSecret, ephemeralKey, paymentIntentId, customerId: returnedCustomerId };
-    } catch (error) {
-      console.error('Error in initializePaymentSheet:', error);
-      throw error;
-    }
-  }, [total, orderType, cart, userProfile]);
-
-  // ============================================================================
-  // ORDER CREATION (AFTER SUCCESSFUL PAYMENT)
-  // ============================================================================
-
-  const createOrderAfterPayment = useCallback(async (paymentIntentId: string) => {
-    if (!userProfile) throw new Error('User profile not found');
-
-    console.log('Creating order after successful payment...');
-    console.log('Payment Intent ID:', paymentIntentId);
-    console.log('Points to earn:', pointsToEarn);
-
-    // Create order
-    const { data: order, error: orderError } = await supabase
-      .from('orders')
-      .insert({
-        user_id: userProfile.id,
-        total: total,
-        points_earned: pointsToEarn,
-        status: 'confirmed',
-        payment_status: 'succeeded',
-        payment_id: paymentIntentId,
-        delivery_address: orderType === 'delivery' ? (validatedAddress || deliveryAddress) : null,
-        pickup_notes: orderType === 'pickup' ? pickupNotes : null,
-      })
-      .select()
-      .single<Order>();
-
-    if (orderError || !order) {
-      console.error('Error creating order:', orderError);
-      throw new Error('Failed to create order');
+      const { customerId: newCustomerId } = await createCustomerResponse.json();
+      customerId = newCustomerId;
+      console.log('Stripe customer created:', customerId);
     }
 
-    console.log('Order created:', order.id);
+    // Calculate points used (convert dollars back to points)
+    const pointsUsed = usePoints ? Math.floor(pointsDiscount / POINTS_TO_DOLLAR_RATE) : 0;
 
-    // Create order items
+    // Prepare order items for metadata
     const orderItems = cart.map(item => ({
-      order_id: order.id,
-      menu_item_id: item.id,
+      id: item.id,
       name: item.name,
       price: item.price,
       quantity: item.quantity,
     }));
 
-    const { error: itemsError } = await supabase
-      .from('order_items')
-      .insert(orderItems);
+    // Create payment intent with ALL order data in metadata
+    console.log('Creating payment intent with metadata...');
+    console.log('Order type:', orderType);
+    console.log('Delivery address:', orderType === 'delivery' ? (validatedAddress || deliveryAddress) : 'N/A');
+    
+    const response = await fetch(`${SUPABASE_URL}/functions/v1/create-payment-intent`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        amount: Math.round(total * 100), // Convert to cents
+        currency: 'usd',
+        customerId,
+        setupFutureUsage: 'off_session',
+        metadata: {
+          // Required fields for order creation
+          user_id: user.id,
+          order_type: orderType, // ← 'delivery' or 'pickup'
+          delivery_address: orderType === 'delivery' ? (validatedAddress || deliveryAddress) : '',
+          pickup_notes: pickupNotes || '',
+          
+          // Order details
+          items: JSON.stringify(orderItems),
+          subtotal: subtotal.toFixed(2),
+          tax: tax.toFixed(2),
+          total: total.toFixed(2),
+          discount: discount.toFixed(2),
+          
+          // Points
+          points_earned: pointsToEarn.toString(),
+          points_used: pointsUsed.toString(),
+          points_discount: pointsDiscount.toFixed(2),
+          
+          // Additional info
+          item_count: cart.length.toString(),
+          customer_name: userProfile?.name || '',
+          customer_email: userProfile?.email || user.email || '',
+          customer_phone: userProfile?.phone || '',
+        },
+      }),
+    });
 
-    if (itemsError) {
-      console.error('Error creating order items:', itemsError);
-      throw new Error('Failed to create order items');
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Error creating payment intent:', errorText);
+      throw new Error('Failed to create payment intent');
     }
 
-    // Deduct points if used
-    if (usePoints && pointsDiscount > 0) {
-      // CORRECTED: Convert dollars back to points (divide by 0.01)
-      const pointsToDeduct = Math.floor(pointsDiscount / POINTS_TO_DOLLAR_RATE);
-      const { error: pointsError } = await supabase
-        .from('user_profiles')
-        .update({ points: availablePoints - pointsToDeduct })
-        .eq('id', userProfile.id);
+    const { clientSecret, ephemeralKey, paymentIntentId, customerId: returnedCustomerId } = await response.json();
+    console.log('Payment intent created:', paymentIntentId);
+    console.log('✓ Metadata included - Order type:', orderType);
 
-      if (pointsError) {
-        console.error('Error deducting points:', pointsError);
-      } else {
-        console.log(`✓ Deducted ${pointsToDeduct} points (worth $${pointsDiscount.toFixed(2)})`);
-      }
-    }
+    return { clientSecret, ephemeralKey, paymentIntentId, customerId: returnedCustomerId };
+  } catch (error) {
+    console.error('Error in initializePaymentSheet:', error);
+    throw error;
+  }
+}, [total, orderType, cart, userProfile, validatedAddress, deliveryAddress, pickupNotes, 
+    subtotal, tax, discount, pointsToEarn, usePoints, pointsDiscount]);
 
-    // Award points for this order
-    const newPointsTotal = availablePoints - (usePoints ? Math.floor(pointsDiscount / POINTS_TO_DOLLAR_RATE) : 0) + pointsToEarn;
-    const { error: awardPointsError } = await supabase
-      .from('user_profiles')
-      .update({ points: newPointsTotal })
-      .eq('id', userProfile.id);
 
-    if (awardPointsError) {
-      console.error('Error awarding points:', awardPointsError);
-    } else {
-      console.log(`✓ Awarded ${pointsToEarn} points`);
-    }
+  // ============================================================================
+  // ORDER CREATION (AFTER SUCCESSFUL PAYMENT)
+  // ============================================================================
 
-    return order.id;
-  }, [userProfile, total, pointsToEarn, orderType, validatedAddress, deliveryAddress, pickupNotes, cart, usePoints, pointsDiscount, availablePoints]);
+  // const createOrderAfterPayment = useCallback(async (paymentIntentId: string) => {
+  //   if (!userProfile) throw new Error('User profile not found');
+
+  //   console.log('Creating order after successful payment...');
+  //   console.log('Payment Intent ID:', paymentIntentId);
+  //   console.log('Points to earn:', pointsToEarn);
+
+  //   // Create order
+  //   const { data: order, error: orderError } = await supabase
+  //     .from('orders')
+  //     .insert({
+  //       user_id: userProfile.id,
+  //       total: total,
+  //       points_earned: pointsToEarn,
+  //       status: 'confirmed',
+  //       payment_status: 'succeeded',
+  //       payment_id: paymentIntentId,
+  //       delivery_address: orderType === 'delivery' ? (validatedAddress || deliveryAddress) : null,
+  //       pickup_notes: orderType === 'pickup' ? pickupNotes : null,
+  //     })
+  //     .select()
+  //     .single<Order>();
+
+  //   if (orderError || !order) {
+  //     console.error('Error creating order:', orderError);
+  //     throw new Error('Failed to create order');
+  //   }
+
+  //   console.log('Order created:', order.id);
+
+  //   // Create order items
+  //   const orderItems = cart.map(item => ({
+  //     order_id: order.id,
+  //     menu_item_id: item.id,
+  //     name: item.name,
+  //     price: item.price,
+  //     quantity: item.quantity,
+  //   }));
+
+  //   const { error: itemsError } = await supabase
+  //     .from('order_items')
+  //     .insert(orderItems);
+
+  //   if (itemsError) {
+  //     console.error('Error creating order items:', itemsError);
+  //     throw new Error('Failed to create order items');
+  //   }
+
+  //   // Deduct points if used
+  //   if (usePoints && pointsDiscount > 0) {
+  //     // CORRECTED: Convert dollars back to points (divide by 0.01)
+  //     const pointsToDeduct = Math.floor(pointsDiscount / POINTS_TO_DOLLAR_RATE);
+  //     const { error: pointsError } = await supabase
+  //       .from('user_profiles')
+  //       .update({ points: availablePoints - pointsToDeduct })
+  //       .eq('id', userProfile.id);
+
+  //     if (pointsError) {
+  //       console.error('Error deducting points:', pointsError);
+  //     } else {
+  //       console.log(`✓ Deducted ${pointsToDeduct} points (worth $${pointsDiscount.toFixed(2)})`);
+  //     }
+  //   }
+
+  //   // Award points for this order
+  //   const newPointsTotal = availablePoints - (usePoints ? Math.floor(pointsDiscount / POINTS_TO_DOLLAR_RATE) : 0) + pointsToEarn;
+  //   const { error: awardPointsError } = await supabase
+  //     .from('user_profiles')
+  //     .update({ points: newPointsTotal })
+  //     .eq('id', userProfile.id);
+
+  //   if (awardPointsError) {
+  //     console.error('Error awarding points:', awardPointsError);
+  //   } else {
+  //     console.log(`✓ Awarded ${pointsToEarn} points`);
+  //   }
+
+  //   return order.id;
+  // }, [userProfile, total, pointsToEarn, orderType, validatedAddress, deliveryAddress, pickupNotes, cart, usePoints, pointsDiscount, availablePoints]);
 
   // ============================================================================
   // ORDER PLACEMENT
@@ -548,6 +583,60 @@ function CheckoutContent() {
     await proceedWithPayment();
   }, [orderType, deliveryAddress, addressTouched, addressValidation, showToast]);
 
+  // ============================================================================
+// OPTIONAL: Realtime approach (more efficient but requires Realtime enabled)
+// ============================================================================
+
+const waitForOrderCreation = useCallback(async (paymentIntentId: string): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      channel.unsubscribe();
+      reject(new Error('Order creation timed out'));
+    }, 30000); // 30 second timeout
+
+    // Subscribe to orders table for this payment
+    const channel = supabase
+      .channel('order-creation')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'orders',
+          filter: `payment_id=eq.${paymentIntentId}`,
+        },
+        (payload: any) => {
+          console.log('✓ Order created via webhook:', payload.new?.id);
+          console.log('✓ Order type:', payload.new?.order_type);
+          clearTimeout(timeout);
+          channel.unsubscribe();
+          resolve(payload.new?.id);
+        }
+      )
+      .subscribe();
+
+    // Also check if order already exists (in case webhook was faster)
+    supabase
+      .from('orders')
+      .select('id, order_type')
+      .eq('payment_id', paymentIntentId)
+      .maybeSingle<Order>()
+      .then(({ data: order }) => {
+        if (order && order.id) {
+          console.log('✓ Order already exists:', order.id);
+          console.log('✓ Order type:', order.order_type);
+          clearTimeout(timeout);
+          channel.unsubscribe();
+          resolve(order.id);
+        }
+      });
+  });
+}, []);
+
+// ============================================================================
+// PAYMENT FLOW (simplified - no order creation in frontend)
+// ============================================================================
+
 const proceedWithPayment = useCallback(async () => {
   setProcessing(true);
 
@@ -586,6 +675,8 @@ const proceedWithPayment = useCallback(async () => {
       console.log('✓ Adding customer and ephemeral key to Payment Sheet config');
       initConfig.customerId = customerId;
       initConfig.customerEphemeralKeySecret = ephemeralKey;
+    } else {
+      console.warn('⚠️ Customer ID or ephemeral key missing - saved cards will not be available');
     }
 
     const { error: initError } = await initPaymentSheet(initConfig);
@@ -619,12 +710,15 @@ const proceedWithPayment = useCallback(async () => {
     const orderId = await waitForOrderCreation(paymentIntentId);
     
     if (!orderId) {
-      throw new Error('Order creation timed out. Please contact support with payment ID: ' + paymentIntentId);
+      throw new Error(
+        'Order creation timed out. Your payment was successful. ' +
+        'Please contact support with this payment ID: ' + paymentIntentId
+      );
     }
 
     console.log('✓ Order confirmed:', orderId);
 
-    // Step 5: Clear cart and reload profile
+    // Step 5: Clear cart and reload profile (to get updated points)
     clearCart();
     await loadUserProfile();
 
@@ -647,51 +741,9 @@ const proceedWithPayment = useCallback(async () => {
     showToast('error', errorMessage);
     setProcessing(false);
   }
-}, [initializePaymentSheet, initPaymentSheet, presentPaymentSheet, clearCart, loadUserProfile, router, showToast, userProfile]);
+}, [initializePaymentSheet, initPaymentSheet, presentPaymentSheet, waitForOrderCreation, 
+    clearCart, loadUserProfile, router, showToast, userProfile]);
 
-const waitForOrderCreation = useCallback(async (paymentIntentId: string): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      channel.unsubscribe();
-      reject(new Error('Order creation timed out'));
-    }, 30000); // 30 second timeout
-
-    // Subscribe to orders table for this payment
-    const channel = supabase
-      .channel('order-creation')
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'orders',
-          filter: `payment_id=eq.${paymentIntentId}`,
-        },
-        (payload) => {
-          console.log('✓ Order created via webhook:', payload.new.id);
-          clearTimeout(timeout);
-          channel.unsubscribe();
-          resolve(payload.new.id);
-        }
-      )
-      .subscribe();
-
-    // Also check if order already exists (in case webhook was faster)
-    supabase
-      .from('orders')
-      .select('id')
-      .eq('payment_id', paymentIntentId)
-      .maybeSingle<Order>()
-      .then(({ data: order }) => {
-        if (order) {
-          console.log('✓ Order already exists:', order.id);
-          clearTimeout(timeout);
-          channel.unsubscribe();
-          resolve(order.id);
-        }
-      });
-  });
-}, []);
 
   // ============================================================================
   // EFFECTS
