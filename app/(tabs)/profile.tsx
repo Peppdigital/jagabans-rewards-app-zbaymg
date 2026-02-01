@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from "react";
 import {
   View,
@@ -23,6 +22,14 @@ import Dialog from "@/components/Dialog";
 import { ActivityIndicator } from "react-native";
 import { supabase } from "@/app/integrations/supabase/client";
 import { LinearGradient } from "expo-linear-gradient";
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// Constants for AsyncStorage keys
+const STORAGE_KEYS = {
+  REMEMBER_ME: '@remember_me',
+  SAVED_EMAIL: '@saved_email',
+  SAVED_PASSWORD: '@saved_password',
+};
 
 export default function ProfileScreen() {
   const router = useRouter();
@@ -37,6 +44,8 @@ export default function ProfileScreen() {
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [rememberMe, setRememberMe] = useState(false);
+  
   // Toast state
   const [toastVisible, setToastVisible] = useState(false);
   const [toastMessage, setToastMessage] = useState("");
@@ -54,40 +63,92 @@ export default function ProfileScreen() {
     buttons: [] as Array<{ text: string; onPress: () => void; style?: 'default' | 'destructive' | 'cancel' }>
   });
 
+  // Check if user is admin or super_admin
+  const isAdmin = userProfile?.userRole === 'admin' || userProfile?.userRole === 'super_admin';
+
+  // Load saved credentials on mount
+  useEffect(() => {
+    loadSavedCredentials();
+  }, []);
+
+  const loadSavedCredentials = async () => {
+    try {
+      const [savedRememberMe, savedEmail, savedPassword] = await Promise.all([
+        AsyncStorage.getItem(STORAGE_KEYS.REMEMBER_ME),
+        AsyncStorage.getItem(STORAGE_KEYS.SAVED_EMAIL),
+        AsyncStorage.getItem(STORAGE_KEYS.SAVED_PASSWORD),
+      ]);
+
+      if (savedRememberMe === 'true' && savedEmail) {
+        setRememberMe(true);
+        setEmail(savedEmail);
+        if (savedPassword) {
+          setPassword(savedPassword);
+        }
+      }
+    } catch (error) {
+      console.error('Error loading saved credentials:', error);
+    }
+  };
+
+  const saveCredentials = async (emailToSave: string, passwordToSave: string, shouldRemember: boolean) => {
+    try {
+      if (shouldRemember) {
+        await AsyncStorage.setItem(STORAGE_KEYS.REMEMBER_ME, 'true');
+        await AsyncStorage.setItem(STORAGE_KEYS.SAVED_EMAIL, emailToSave);
+        await AsyncStorage.setItem(STORAGE_KEYS.SAVED_PASSWORD, passwordToSave);
+      } else {
+        await AsyncStorage.removeItem(STORAGE_KEYS.REMEMBER_ME);
+        await AsyncStorage.removeItem(STORAGE_KEYS.SAVED_EMAIL);
+        await AsyncStorage.removeItem(STORAGE_KEYS.SAVED_PASSWORD);
+      }
+    } catch (error) {
+      console.error('Error saving credentials:', error);
+    }
+  };
+
+  const clearSavedCredentials = async () => {
+    try {
+      await AsyncStorage.removeItem(STORAGE_KEYS.REMEMBER_ME);
+      await AsyncStorage.removeItem(STORAGE_KEYS.SAVED_EMAIL);
+      await AsyncStorage.removeItem(STORAGE_KEYS.SAVED_PASSWORD);
+    } catch (error) {
+      console.error('Error clearing saved credentials:', error);
+    }
+  };
+
   useEffect(() => {
     const fetchProfileImage = async () => {
-  if (!userProfile?.profileImage) return;
+      if (!userProfile?.profileImage) return;
 
-  setImageLoading(true);
+      setImageLoading(true);
 
-  try {
-    const path = userProfile.profileImage; 
-    let url = "";
+      try {
+        const path = userProfile.profileImage; 
+        let url = "";
 
-    // If the saved value is already a full URL
-    if (path.startsWith("http")) {
-      url = path;
-    } else {
-      // Generate signed URL for private bucket
-      const { data, error } = await supabase.storage
-        .from("profile")
-        .createSignedUrl(path, 60 * 60 * 24 * 7); // 7 days
+        // If the saved value is already a full URL
+        if (path.startsWith("http")) {
+          url = path;
+        } else {
+          // Generate signed URL for private bucket
+          const { data, error } = await supabase.storage
+            .from("profile")
+            .createSignedUrl(path, 60 * 60 * 24 * 7); // 7 days
 
-      if (error) throw error;
+          if (error) throw error;
 
-      url = data.signedUrl;
-    }
+          url = data.signedUrl;
+        }
 
-    setProfileImageUrl(url);
-  } catch (err) {
-    console.error("Failed to load profile image:", err);
-    showLocalToast("error", "Could not load profile picture");
-  } finally {
-    setImageLoading(false);
-  }
-};
-
-
+        setProfileImageUrl(url);
+      } catch (err) {
+        console.error("Failed to load profile image:", err);
+        showLocalToast("error", "Could not load profile picture");
+      } finally {
+        setImageLoading(false);
+      }
+    };
 
     if (isAuthenticated) {
       fetchProfileImage();
@@ -171,6 +232,10 @@ export default function ProfileScreen() {
             successMessage += " Your referral bonus will be applied once your email is verified.";
           }
           showLocalToast("success", successMessage);
+          
+          // Save credentials if remember me is checked
+          await saveCredentials(email, password, rememberMe);
+          
           // Clear form after successful signup
           setEmail("");
           setPassword("");
@@ -197,8 +262,11 @@ export default function ProfileScreen() {
           }
         } else {
           showLocalToast("success", "Welcome back!");
-          // Clear form after successful sign in
-          setEmail("");
+          
+          // Save credentials if remember me is checked
+          await saveCredentials(email, password, rememberMe);
+          
+          // Clear password after successful sign in (keep email if remember me is checked)
           setPassword("");
           setShowPassword(false);
         }
@@ -232,13 +300,18 @@ export default function ProfileScreen() {
           try {
             await signOut();
             // Clear any form data
-            setEmail("");
-            setPassword("");
             setName("");
             setPhone("");
             setInviteCode("");
             setIsSignUp(false);
             setShowPassword(false);
+            
+            // Don't clear email and password if remember me is enabled
+            if (!rememberMe) {
+              setEmail("");
+              setPassword("");
+            }
+            
             showLocalToast("success", "Signed out successfully");
           } catch (error) {
             console.error("Sign out error:", error);
@@ -255,6 +328,20 @@ export default function ProfileScreen() {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     }
     router.push(route as any);
+  };
+
+  const toggleRememberMe = async () => {
+    const newValue = !rememberMe;
+    setRememberMe(newValue);
+    
+    if (Platform.OS !== "web") {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    
+    // If unchecking, clear saved credentials immediately
+    if (!newValue) {
+      await clearSavedCredentials();
+    }
   };
 
   if (!isAuthenticated) {
@@ -397,6 +484,39 @@ export default function ProfileScreen() {
                   </Pressable>
                 </LinearGradient>
 
+                {/* Remember Me Checkbox - Only show on Sign In */}
+                {!isSignUp && (
+                  <Pressable
+                    style={styles.rememberMeContainer}
+                    onPress={toggleRememberMe}
+                    disabled={loading}
+                  >
+                    <View
+                      style={[
+                        styles.checkbox,
+                        { borderColor: currentColors.border },
+                        rememberMe && { backgroundColor: currentColors.primary },
+                      ]}
+                    >
+                      {rememberMe && (
+                        <IconSymbol
+                          name="checkmark"
+                          size={16}
+                          color={currentColors.card}
+                        />
+                      )}
+                    </View>
+                    <Text
+                      style={[
+                        styles.rememberMeText,
+                        { color: currentColors.textSecondary },
+                      ]}
+                    >
+                      Remember me
+                    </Text>
+                  </Pressable>
+                )}
+
                 {isSignUp && (
                   <>
                     <LinearGradient
@@ -487,9 +607,11 @@ export default function ProfileScreen() {
                   style={styles.switchButton}
                   onPress={() => {
                     setIsSignUp(!isSignUp);
-                    // Clear form when switching
-                    setEmail("");
-                    setPassword("");
+                    // Clear form when switching (except email and password if remember me is on)
+                    if (!rememberMe) {
+                      setEmail("");
+                      setPassword("");
+                    }
                     setName("");
                     setPhone("");
                     setInviteCode("");
@@ -511,31 +633,6 @@ export default function ProfileScreen() {
                     >
                       {isSignUp ? "Sign In" : "Sign Up"}
                     </Text>
-                  </Text>
-                </Pressable>
-                {/* Admin Access Link */}
-                <Pressable
-                  style={styles.adminButton}
-                  onPress={() => {
-                    if (Platform.OS !== "web") {
-                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                    }
-                    handleMenuPress("/admin");
-                  }}
-                  disabled={loading}
-                >
-                  <IconSymbol
-                    name="admin-panel-settings"
-                    size={16}
-                    color={currentColors.textSecondary}
-                  />
-                  <Text
-                    style={[
-                      styles.adminButtonText,
-                      { color: currentColors.textSecondary },
-                    ]}
-                  >
-                    Admin Dashboard
                   </Text>
                 </Pressable>
               </View>
@@ -674,6 +771,46 @@ export default function ProfileScreen() {
 
           {/* Menu Options */}
           <View style={styles.menuSection}>
+
+            {/* Admin Dashboard - Only show for admin/super_admin */}
+            {isAdmin && (
+              <LinearGradient
+                colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.menuItem}
+              >
+                <Pressable
+                  style={styles.menuItemInner}
+                  onPress={() => handleMenuPress("/admin")}
+                >
+                  <View
+                    style={[styles.menuIcon, { backgroundColor: "#FF9800" + "20" }]}
+                  >
+                    <IconSymbol name="admin-panel-settings" size={24} color="#FF9800" />
+                  </View>
+                  <View style={styles.menuContent}>
+                    <Text style={[styles.menuTitle, { color: currentColors.text }]}>
+                      Admin Dashboard
+                    </Text>
+                    <Text
+                      style={[
+                        styles.menuSubtitle,
+                        { color: currentColors.textSecondary },
+                      ]}
+                    >
+                      Manage app settings and users
+                    </Text>
+                  </View>
+                  <IconSymbol
+                    name="chevron.right"
+                    size={24}
+                    color={currentColors.textSecondary}
+                  />
+                </Pressable>
+              </LinearGradient>
+            )}
+            
             <LinearGradient
               colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
               start={{ x: 0, y: 0 }}
@@ -1061,6 +1198,24 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     marginLeft: 4,
     fontStyle: 'italic',
+  },
+  rememberMeContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 16,
+    marginTop: -8,
+  },
+  checkbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 4,
+    borderWidth: 2,
+    justifyContent: "center",
+    alignItems: "center",
+    marginRight: 8,
+  },
+  rememberMeText: {
+    fontSize: 14,
   },
   authButton: {
     borderRadius: 0,

@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback } from "react";
 import {
   View,
@@ -23,6 +22,14 @@ import { supabase } from "@/app/integrations/supabase/client";
 import { useApp } from "@/contexts/AppContext";
 import Dialog from "@/components/Dialog";
 import Toast from "@/components/Toast";
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// Constants for AsyncStorage keys
+const ADMIN_STORAGE_KEYS = {
+  REMEMBER_ME: '@admin_remember_me',
+  SAVED_USERNAME: '@admin_saved_username',
+  SAVED_PASSWORD: '@admin_saved_password',
+};
 
 export default function AdminDashboard() {
   const router = useRouter();
@@ -33,6 +40,7 @@ export default function AdminDashboard() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [statsLoading, setStatsLoading] = useState(true);
+  const [rememberMe, setRememberMe] = useState(false);
   const [stats, setStats] = useState({
     totalOrders: 0,
     activeUsers: 0,
@@ -62,6 +70,57 @@ export default function AdminDashboard() {
     setToastType(type);
     setToastMessage(message);
     setToastVisible(true);
+  };
+
+  // Load saved credentials on mount
+  useEffect(() => {
+    loadSavedCredentials();
+  }, []);
+
+  const loadSavedCredentials = async () => {
+    try {
+      const [savedRememberMe, savedUsername, savedPassword] = await Promise.all([
+        AsyncStorage.getItem(ADMIN_STORAGE_KEYS.REMEMBER_ME),
+        AsyncStorage.getItem(ADMIN_STORAGE_KEYS.SAVED_USERNAME),
+        AsyncStorage.getItem(ADMIN_STORAGE_KEYS.SAVED_PASSWORD),
+      ]);
+
+      if (savedRememberMe === 'true' && savedUsername) {
+        setRememberMe(true);
+        setUsername(savedUsername);
+        if (savedPassword) {
+          setPassword(savedPassword);
+        }
+      }
+    } catch (error) {
+      console.error('Error loading saved admin credentials:', error);
+    }
+  };
+
+  const saveCredentials = async (usernameToSave: string, passwordToSave: string, shouldRemember: boolean) => {
+    try {
+      if (shouldRemember) {
+        await AsyncStorage.setItem(ADMIN_STORAGE_KEYS.REMEMBER_ME, 'true');
+        await AsyncStorage.setItem(ADMIN_STORAGE_KEYS.SAVED_USERNAME, usernameToSave);
+        await AsyncStorage.setItem(ADMIN_STORAGE_KEYS.SAVED_PASSWORD, passwordToSave);
+      } else {
+        await AsyncStorage.removeItem(ADMIN_STORAGE_KEYS.REMEMBER_ME);
+        await AsyncStorage.removeItem(ADMIN_STORAGE_KEYS.SAVED_USERNAME);
+        await AsyncStorage.removeItem(ADMIN_STORAGE_KEYS.SAVED_PASSWORD);
+      }
+    } catch (error) {
+      console.error('Error saving admin credentials:', error);
+    }
+  };
+
+  const clearSavedCredentials = async () => {
+    try {
+      await AsyncStorage.removeItem(ADMIN_STORAGE_KEYS.REMEMBER_ME);
+      await AsyncStorage.removeItem(ADMIN_STORAGE_KEYS.SAVED_USERNAME);
+      await AsyncStorage.removeItem(ADMIN_STORAGE_KEYS.SAVED_PASSWORD);
+    } catch (error) {
+      console.error('Error clearing saved admin credentials:', error);
+    }
   };
 
   const isAdmin = userProfile?.userRole === 'admin' || userProfile?.userRole === 'super_admin';
@@ -118,6 +177,13 @@ export default function AdminDashboard() {
       }
     } else {
       showToast('success', 'Welcome to Admin Dashboard!');
+      
+      // Save credentials if remember me is checked
+      await saveCredentials(username, password, rememberMe);
+      
+      // Clear password after successful login (keep username if remember me is checked)
+      setPassword("");
+      setShowPassword(false);
     }
   };
 
@@ -128,8 +194,13 @@ export default function AdminDashboard() {
     }
     try {
       await signOut();
-      setUsername("");
-      setPassword("");
+      
+      // Don't clear username and password if remember me is enabled
+      if (!rememberMe) {
+        setUsername("");
+        setPassword("");
+      }
+      
       showToast('success', 'Logged out successfully');
     } catch (error) {
       console.error('Logout error:', error);
@@ -142,6 +213,20 @@ export default function AdminDashboard() {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     }
     setShowPassword(!showPassword);
+  };
+
+  const toggleRememberMe = async () => {
+    const newValue = !rememberMe;
+    setRememberMe(newValue);
+    
+    if (Platform.OS !== "web") {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    
+    // If unchecking, clear saved credentials immediately
+    if (!newValue) {
+      await clearSavedCredentials();
+    }
   };
 
   const fetchStats = useCallback(async () => {
@@ -396,6 +481,37 @@ export default function AdminDashboard() {
                     />
                   </Pressable>
                 </View>
+
+                {/* Remember Me Checkbox */}
+                <Pressable
+                  style={styles.rememberMeContainer}
+                  onPress={toggleRememberMe}
+                  disabled={loading}
+                >
+                  <View
+                    style={[
+                      styles.checkbox,
+                      { borderColor: colors.border },
+                      rememberMe && { backgroundColor: colors.primary },
+                    ]}
+                  >
+                    {rememberMe && (
+                      <IconSymbol
+                        name="checkmark"
+                        size={16}
+                        color="#FFFFFF"
+                      />
+                    )}
+                  </View>
+                  <Text
+                    style={[
+                      styles.rememberMeText,
+                      { color: colors.textSecondary },
+                    ]}
+                  >
+                    Remember me
+                  </Text>
+                </Pressable>
 
                 <Pressable
                   style={({ pressed }) => [
@@ -722,6 +838,24 @@ const styles = StyleSheet.create({
   eyeIconButton: {
     padding: 4,
     marginLeft: 8,
+  },
+  rememberMeContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 16,
+    marginTop: -8,
+  },
+  checkbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 4,
+    borderWidth: 2,
+    justifyContent: "center",
+    alignItems: "center",
+    marginRight: 8,
+  },
+  rememberMeText: {
+    fontSize: 14,
   },
   loginButton: {
     backgroundColor: colors.primary,
