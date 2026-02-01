@@ -588,49 +588,30 @@ const initializePaymentSheet = useCallback(async () => {
 // ============================================================================
 
 const waitForOrderCreation = useCallback(async (paymentIntentId: string): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      channel.unsubscribe();
-      reject(new Error('Order creation timed out'));
-    }, 30000); // 30 second timeout
-
-    // Subscribe to orders table for this payment
-    const channel = supabase
-      .channel('order-creation')
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'orders',
-          filter: `payment_id=eq.${paymentIntentId}`,
-        },
-        (payload: any) => {
-          console.log('✓ Order created via webhook:', payload.new?.id);
-          console.log('✓ Order type:', payload.new?.order_type);
-          clearTimeout(timeout);
-          channel.unsubscribe();
-          resolve(payload.new?.id);
-        }
-      )
-      .subscribe();
-
-    // Also check if order already exists (in case webhook was faster)
-    supabase
+  const maxAttempts = 30; // 30 attempts
+  const delayMs = 1000; // 1 second between attempts
+  
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const { data: order } = await supabase
       .from('orders')
       .select('id, order_type')
       .eq('payment_id', paymentIntentId)
-      .maybeSingle<Order>()
-      .then(({ data: order }) => {
-        if (order && order.id) {
-          console.log('✓ Order already exists:', order.id);
-          console.log('✓ Order type:', order.order_type);
-          clearTimeout(timeout);
-          channel.unsubscribe();
-          resolve(order.id);
-        }
-      });
-  });
+      .maybeSingle<Order>();
+
+    if (order?.id) {
+      console.log('✓ Order found:', order.id);
+      console.log('✓ Order type:', order.order_type);
+      return order.id;
+    }
+
+    console.log(`Waiting for order... (attempt ${attempt + 1}/${maxAttempts})`);
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+  }
+
+  throw new Error(
+    'Order creation timed out. Your payment was successful. ' +
+    'Please contact support with this payment ID: ' + paymentIntentId
+  );
 }, []);
 
 // ============================================================================

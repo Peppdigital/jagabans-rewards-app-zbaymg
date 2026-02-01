@@ -178,8 +178,8 @@ export default function PostDetailScreen() {
         ) : (
           <View style={[styles.commentAvatar, { backgroundColor: currentColors.secondary }]}>
             <IconSymbol
-              ios_icon_name="person.fill"
-              android_material_icon_name="person"
+              name="person.fill"
+              // android_material_icon_name="person"
               size={16}
               color={currentColors.background}
             />
@@ -248,8 +248,8 @@ export default function PostDetailScreen() {
               style={[styles.backButton, { backgroundColor: currentColors.background, borderColor: currentColors.border }]}
             >
               <IconSymbol
-                ios_icon_name="chevron.left"
-                android_material_icon_name="arrow-back"
+                name="chevron.left"
+                // android_material_icon_name="arrow-back"
                 size={24}
                 color={currentColors.secondary}
               />
@@ -290,8 +290,7 @@ export default function PostDetailScreen() {
               style={[styles.backButton, { backgroundColor: currentColors.background, borderColor: currentColors.border }]}
             >
               <IconSymbol
-                ios_icon_name="chevron.left"
-                android_material_icon_name="arrow-back"
+                name="chevron.left"
                 size={24}
                 color={currentColors.secondary}
               />
@@ -301,8 +300,7 @@ export default function PostDetailScreen() {
           </LinearGradient>
           <View style={styles.emptyContainer}>
             <IconSymbol
-              ios_icon_name="exclamationmark.triangle"
-              android_material_icon_name="warning"
+              name="exclamationmark.triangle"
               size={80}
               color={currentColors.textSecondary}
             />
@@ -340,8 +338,7 @@ export default function PostDetailScreen() {
             style={[styles.backButton, { backgroundColor: currentColors.background, borderColor: currentColors.border }]}
           >
             <IconSymbol
-              ios_icon_name="chevron.left"
-              android_material_icon_name="arrow-back"
+              name="chevron.left"
               size={24}
               color={currentColors.secondary}
             />
@@ -352,8 +349,7 @@ export default function PostDetailScreen() {
             style={[styles.shareButton, { backgroundColor: currentColors.background, borderColor: currentColors.border }]}
           >
             <IconSymbol
-              ios_icon_name="square.and.arrow.up"
-              android_material_icon_name="share"
+              name="square.and.arrow.up"
               size={24}
               color={currentColors.secondary}
             />
@@ -401,8 +397,7 @@ export default function PostDetailScreen() {
                           style={styles.avatar}
                         >
                           <IconSymbol
-                            ios_icon_name="person.fill"
-                            android_material_icon_name="person"
+                            name="person.fill"
                             size={20}
                             color={currentColors.background}
                           />
@@ -416,8 +411,7 @@ export default function PostDetailScreen() {
                       {post.locationVerified && (
                         <View style={[styles.verifiedBadge, { backgroundColor: 'rgba(255,255,255,0.2)' }]}>
                           <IconSymbol
-                            ios_icon_name="checkmark.seal.fill"
-                            android_material_icon_name="check-circle"
+                            name="checkmark.seal.fill"
                             size={13}
                             color={currentColors.secondary}
                           />
@@ -443,8 +437,7 @@ export default function PostDetailScreen() {
                     post.isLikedByCurrentUser && { backgroundColor: '#FF3B3015' }
                   ]}>
                     <IconSymbol
-                      ios_icon_name={post.isLikedByCurrentUser ? 'heart.fill' : 'heart'}
-                      android_material_icon_name={post.isLikedByCurrentUser ? 'favorite' : 'favorite-border'}
+                      name={post.isLikedByCurrentUser ? 'heart.fill' : 'heart'}
                       size={22}
                       color={post.isLikedByCurrentUser ? '#FF3B30' : currentColors.text}
                     />
@@ -457,8 +450,7 @@ export default function PostDetailScreen() {
                 <View style={styles.actionButton}>
                   <View style={styles.actionIconWrapper}>
                     <IconSymbol
-                      ios_icon_name="message"
-                      android_material_icon_name="chat"
+                      name="message"
                       size={22}
                       color={currentColors.text}
                     />
@@ -552,8 +544,7 @@ export default function PostDetailScreen() {
                     }}
                   >
                     <IconSymbol
-                      ios_icon_name="xmark.circle.fill"
-                      android_material_icon_name="cancel"
+                      name="xmark.circle.fill"
                       size={20}
                       color={currentColors.textSecondary}
                     />
@@ -591,8 +582,7 @@ export default function PostDetailScreen() {
                     <ActivityIndicator size="small" color={currentColors.background} />
                   ) : (
                     <IconSymbol
-                      ios_icon_name="paperplane.fill"
-                      android_material_icon_name="send"
+                      name="paperplane.fill"
                       size={20}
                       color={currentColors.background}
                     />
