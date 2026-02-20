@@ -38,6 +38,7 @@ export default function AdminMenuManagement() {
     price: "",
     category: "Main Dishes",
     image: "",
+    available: true,
   });
 
   // Dialog state
@@ -95,14 +96,27 @@ export default function AdminMenuManagement() {
           formData.image ||
           "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400",
         popular: false,
-        available: true,
+        available: formData.available,
       };
 
       try {
         const res = await menuService.addMenuItem(payload);
         if (res.error || !res.data) throw res.error || new Error("Add failed");
-        const added = res.data as MenuItem | null;
-        if (added) setItems((s) => [added, ...s]);
+        const added = res.data as any;
+        if (added) {
+          const mappedItem: MenuItem = {
+            id: String(added.id),
+            name: added.name,
+            description: added.description,
+            price: parseFloat(added.price),
+            category: added.category,
+            image: added.image,
+            popular: added.popular || false,
+            available: added.available !== false,
+            serial: added.serial,
+          };
+          setItems((s) => [mappedItem, ...s]);
+        }
         setIsAddingItem(false);
         resetForm();
         showToast('success', 'Menu item added successfully');
@@ -122,15 +136,28 @@ export default function AdminMenuManagement() {
         price: parseFloat(formData.price),
         category: formData.category,
         image: formData.image,
+        available: formData.available,
       };
 
       try {
         const res = await menuService.updateMenuItem(itemId, updates);
         if (res.error || !res.data)
           throw res.error || new Error("Update failed");
+        const updated = res.data as any;
+        const mappedItem: MenuItem = {
+          id: String(updated.id),
+          name: updated.name,
+          description: updated.description,
+          price: parseFloat(updated.price),
+          category: updated.category,
+          image: updated.image,
+          popular: updated.popular || false,
+          available: updated.available !== false,
+          serial: updated.serial,
+        };
         setItems((prev) =>
           prev.map((it) =>
-            it.id === itemId ? (res.data as MenuItem) : it
+            it.id === itemId ? mappedItem : it
           )
         );
         setEditingItemId(null);
@@ -182,6 +209,7 @@ export default function AdminMenuManagement() {
       price: item.price.toString(),
       category: item.category,
       image: item.image,
+      available: item.available ?? true,
     });
   };
 
@@ -192,6 +220,7 @@ export default function AdminMenuManagement() {
       price: "",
       category: "Main Dishes",
       image: "",
+      available: true,
     });
   };
 
@@ -205,7 +234,18 @@ export default function AdminMenuManagement() {
       try {
         const res = await menuService.getMenuItems();
         if (res.error) throw res.error;
-        setItems(res.data || []);
+        const mappedItems = (res.data || []).map((item: any) => ({
+          id: String(item.id),
+          name: item.name,
+          description: item.description,
+          price: parseFloat(item.price),
+          category: item.category,
+          image: item.image,
+          popular: item.popular || false,
+          available: item.available !== false,
+          serial: item.serial,
+        }));
+        setItems(mappedItems);
       } catch (err) {
         console.error("Failed to load menu items", err);
       }
@@ -314,6 +354,34 @@ export default function AdminMenuManagement() {
         />
       </View>
 
+      <View style={styles.availabilitySection}>
+        <View style={styles.availabilityHeader}>
+          <Text style={styles.inputLabel}>Available for Order</Text>
+          <Pressable
+            style={[
+              styles.toggleButton,
+              formData.available && styles.toggleButtonActive
+            ]}
+            onPress={() => {
+              if (Platform.OS !== "web") {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              }
+              setFormData({ ...formData, available: !formData.available });
+            }}
+          >
+            <View
+              style={[
+                styles.toggleCircle,
+                formData.available && styles.toggleCircleActive
+              ]}
+            />
+          </Pressable>
+        </View>
+        <Text style={styles.availabilitySubtext}>
+          {formData.available ? "Item is available" : "Item is unavailable - won't show in customer menu"}
+        </Text>
+      </View>
+
       <View style={styles.formButtons}>
         <Pressable
           style={[styles.button, styles.cancelButton]}
@@ -418,32 +486,39 @@ export default function AdminMenuManagement() {
         <View style={styles.itemsContainer}>
           {filteredItems.map((item) => (
             <React.Fragment key={item.id}>
-              <View style={styles.menuItem}>
-                <Image source={{ uri: item.image }} style={styles.itemImage} />
-                <View style={styles.itemContent}>
-                  <Text style={styles.itemName}>{item.name}</Text>
-                  <Text style={styles.itemDescription} numberOfLines={2}>
-                    {item.description}
-                  </Text>
-                  <View style={styles.itemFooter}>
-                    <Text style={styles.itemPrice}>${item.price.toFixed(2)}</Text>
-                    <Text style={styles.itemCategory}>{item.category}</Text>
+              <View style={styles.menuItemWrapper}>
+                <View style={styles.menuItem}>
+                  <Image source={{ uri: item.image }} style={styles.itemImage} />
+                  <View style={styles.itemContent}>
+                    <Text style={styles.itemName}>{item.name}</Text>
+                    <Text style={styles.itemDescription} numberOfLines={2}>
+                      {item.description}
+                    </Text>
+                    <View style={styles.itemFooter}>
+                      <Text style={styles.itemPrice}>${item.price.toFixed(2)}</Text>
+                      <Text style={styles.itemCategory}>{item.category}</Text>
+                    </View>
+                  </View>
+                  <View style={styles.itemActions}>
+                    <Pressable
+                      style={styles.actionButton}
+                      onPress={() => handleEditItem(item)}
+                    >
+                      <IconSymbol name="pencil" size={20} color={colors.primary} />
+                    </Pressable>
+                    <Pressable
+                      style={styles.actionButton}
+                      onPress={() => handleDeleteItem(item.id)}
+                    >
+                      <IconSymbol name="trash.fill" size={20} color="#FF6B6B" />
+                    </Pressable>
                   </View>
                 </View>
-                <View style={styles.itemActions}>
-                  <Pressable
-                    style={styles.actionButton}
-                    onPress={() => handleEditItem(item)}
-                  >
-                    <IconSymbol name="pencil" size={20} color={colors.primary} />
-                  </Pressable>
-                  <Pressable
-                    style={styles.actionButton}
-                    onPress={() => handleDeleteItem(item.id)}
-                  >
-                    <IconSymbol name="trash.fill" size={20} color="#FF6B6B" />
-                  </Pressable>
-                </View>
+                {!item.available && (
+                  <View style={styles.unavailableBadge}>
+                    <Text style={styles.unavailableBadgeText}>UNAVAILABLE</Text>
+                  </View>
+                )}
               </View>
               
               {editingItemId === item.id && renderEditForm(item.id)}
@@ -643,6 +718,9 @@ const styles = StyleSheet.create({
     padding: 16,
     gap: 12,
   },
+  menuItemWrapper: {
+    position: "relative",
+  },
   menuItem: {
     flexDirection: "row",
     backgroundColor: colors.card,
@@ -695,5 +773,62 @@ const styles = StyleSheet.create({
   },
   actionButton: {
     padding: 8,
+  },
+  unavailableBadge: {
+    position: "absolute",
+    top: 8,
+    right: 8,
+    backgroundColor: "#FF6B6B",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+    zIndex: 10,
+  },
+  unavailableBadgeText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#FFFFFF",
+    letterSpacing: 0.5,
+  },
+  availabilitySection: {
+    marginBottom: 16,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  availabilityHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 8,
+  },
+  toggleButton: {
+    width: 56,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: colors.background,
+    borderWidth: 2,
+    borderColor: colors.border,
+    justifyContent: "center",
+    paddingHorizontal: 2,
+  },
+  toggleButtonActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  toggleCircle: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: colors.textSecondary,
+  },
+  toggleCircleActive: {
+    backgroundColor: "#FFFFFF",
+    alignSelf: "flex-end",
+  },
+  availabilitySubtext: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    fontStyle: "italic",
   },
 });

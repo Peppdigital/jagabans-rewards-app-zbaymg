@@ -16,6 +16,7 @@ import {
   paymentMethodService
 } from '@/services/supabaseService';
 import { RealtimeChannel } from '@supabase/supabase-js';
+import { playOrderReadySound, configureNotificationSound } from '@/utils/notificationSound';
 
 interface ToastConfig {
   visible: boolean;
@@ -89,13 +90,14 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
 
       if (data) {
         const items: MenuItem[] = data.map((item: any) => ({
-          id: item.id,
+          id: String(item.id),
           name: item.name,
           description: item.description,
           price: parseFloat(item.price),
           category: item.category,
           image: item.image,
           popular: item.popular,
+          available: item.available !== false,
           serial: item.serial,
         }));
         setMenuItems(items);
@@ -245,6 +247,11 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     }
   }, [user]);
   
+  // Initialize notification sound settings on app startup
+  useEffect(() => {
+    configureNotificationSound();
+  }, []);
+
   // Load menu items when the app starts (in useEffect):
   useEffect(() => {
     loadMenuItems();
@@ -301,6 +308,13 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           console.log('Order updated:', payload);
           const order = payload.new as any;
           showToast(`Order status updated to: ${order.status}`, 'info');
+          
+          // Play sound notification when order status changes to "ready"
+          if (order.status === 'ready') {
+            console.log('Order is ready! Playing notification sound');
+            playOrderReadySound();
+          }
+          
           loadUserProfile(); // Reload profile to get updated orders
         })
         .on('broadcast', { event: 'DELETE' }, (payload) => {

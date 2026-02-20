@@ -88,6 +88,36 @@ serve(async (req) => {
     const orderData: OrderEmailData = await req.json();
     console.log('Order data received:', orderData.orderId);
 
+    // ============================================================================
+    // IDEMPOTENCY CHECK: Prevent duplicate notifications for the same order
+    // ============================================================================
+    const { data: existingNotification, error: checkError } = await supabase
+      .from('email_notifications')
+      .select('id')
+      .eq('order_id', orderData.orderId)
+      .eq('status', 'sent')
+      .single();
+
+    if (checkError && checkError.code !== 'PGRST116') {
+      // PGRST116 = no rows found (which is expected)
+      console.error('Error checking for existing notifications:', checkError);
+    }
+
+    if (existingNotification) {
+      console.log('⚠️ Email already sent for this order. Returning success (idempotent):', orderData.orderId);
+      return new Response(
+        JSON.stringify({ 
+          success: true, 
+          message: 'Order confirmation email already sent (idempotent)',
+          alreadySent: true
+        }),
+        {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          status: 200,
+        }
+      );
+    }
+
     // Get active admin email recipients from database
     const { data: emailRecords, error: emailError } = await supabase
       .from('admin_notification_emails')

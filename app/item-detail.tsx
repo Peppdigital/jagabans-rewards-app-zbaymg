@@ -280,25 +280,34 @@ export default function ItemDetailScreen() {
               <Text style={[styles.name, { color: currentColors.text }]}>
                 {item.name}
               </Text>
-              {item.popular && (
-                <View
-                  style={[
-                    styles.popularBadge,
-                    { backgroundColor: currentColors.secondary },
-                  ]}
-                >
-                  <IconSymbol
-                    name="star.fill"
-                    size={14}
-                    color={currentColors.background}
-                  />
-                  <Text
-                    style={[styles.popularText, { color: currentColors.background }]}
+              <View style={styles.badgesContainer}>
+                {!item.available && (
+                  <View style={[styles.badge, styles.unavailableBadge]}>
+                    <IconSymbol name="xmark.circle.fill" size={14} color="#FFFFFF" />
+                    <Text style={styles.badgeText}>Unavailable</Text>
+                  </View>
+                )}
+                {item.popular && (
+                  <View
+                    style={[
+                      styles.badge,
+                      styles.popularBadge,
+                      { backgroundColor: currentColors.secondary },
+                    ]}
                   >
-                    Popular
-                  </Text>
-                </View>
-              )}
+                    <IconSymbol
+                      name="star.fill"
+                      size={14}
+                      color={currentColors.background}
+                    />
+                    <Text
+                      style={[styles.badgeText, { color: currentColors.background }]}
+                    >
+                      Popular
+                    </Text>
+                  </View>
+                )}
+              </View>
             </View>
             <Text style={[styles.price, { color: currentColors.secondary }]}>
               ${item.price.toFixed(2)}
@@ -322,62 +331,75 @@ export default function ItemDetailScreen() {
             {item.description}
           </Text>
 
-          <View
-            style={[styles.infoCard, { backgroundColor: currentColors.card, borderColor: currentColors.border }]}
-          >
-            <IconSymbol
-              name="star.fill"
-              size={20}
-              color={currentColors.secondary}
-            />
-            <Text style={[styles.infoText, { color: currentColors.text }]}>
-              Earn {Math.floor(item.price * quantity)} points with this order!
-            </Text>
-          </View>
-
-          <View
-            style={[
-              styles.quantitySection,
-              { backgroundColor: currentColors.card, borderColor: currentColors.border },
-            ]}
-          >
-            <Text style={[styles.quantityLabel, { color: currentColors.text }]}>
-              Quantity
-            </Text>
-            <View style={styles.quantityControls}>
-              <Pressable
-                style={[
-                  styles.quantityButton,
-                  { backgroundColor: currentColors.background, borderColor: currentColors.border },
-                ]}
-                onPress={() => handleQuantityChange(-1)}
-              >
-                <IconSymbol
-                  name="minus"
-                  size={20}
-                  color={currentColors.secondary}
-                />
-              </Pressable>
-              <Text
-                style={[styles.quantityValue, { color: currentColors.text }]}
-              >
-                {quantity}
+          {!item.available && (
+            <View style={[styles.unavailableNotice, { backgroundColor: "#FF6B6B", borderColor: "#E63946" }]}>
+              <IconSymbol name="exclamationmark.circle.fill" size={20} color="#FFFFFF" />
+              <Text style={styles.unavailableNoticeText}>
+                This item is currently unavailable
               </Text>
-              <Pressable
-                style={[
-                  styles.quantityButton,
-                  { backgroundColor: currentColors.background, borderColor: currentColors.border },
-                ]}
-                onPress={() => handleQuantityChange(1)}
-              >
-                <IconSymbol
-                  name="plus"
-                  size={20}
-                  color={currentColors.secondary}
-                />
-              </Pressable>
             </View>
-          </View>
+          )}
+
+          {item.available && (
+            <View
+              style={[styles.infoCard, { backgroundColor: currentColors.card, borderColor: currentColors.border }]}
+            >
+              <IconSymbol
+                name="star.fill"
+                size={20}
+                color={currentColors.secondary}
+              />
+              <Text style={[styles.infoText, { color: currentColors.text }]}>
+                Earn {Math.floor(item.price * quantity)} points with this order!
+              </Text>
+            </View>
+          )}
+
+          {item.available && (
+            <View
+              style={[
+                styles.quantitySection,
+                { backgroundColor: currentColors.card, borderColor: currentColors.border },
+              ]}
+            >
+              <Text style={[styles.quantityLabel, { color: currentColors.text }]}>
+                Quantity
+              </Text>
+              <View style={styles.quantityControls}>
+                <Pressable
+                  style={[
+                    styles.quantityButton,
+                    { backgroundColor: currentColors.background, borderColor: currentColors.border },
+                  ]}
+                  onPress={() => handleQuantityChange(-1)}
+                >
+                  <IconSymbol
+                    name="minus"
+                    size={20}
+                    color={currentColors.secondary}
+                  />
+                </Pressable>
+                <Text
+                  style={[styles.quantityValue, { color: currentColors.text }]}
+                >
+                  {quantity}
+                </Text>
+                <Pressable
+                  style={[
+                    styles.quantityButton,
+                    { backgroundColor: currentColors.background, borderColor: currentColors.border },
+                  ]}
+                  onPress={() => handleQuantityChange(1)}
+                >
+                  <IconSymbol
+                    name="plus"
+                    size={20}
+                    color={currentColors.secondary}
+                  />
+                </Pressable>
+              </View>
+            </View>
+          )}
         </View>
       </ScrollView>
 
@@ -390,25 +412,36 @@ export default function ItemDetailScreen() {
           },
         ]}
       >
-        <View style={styles.totalContainer}>
-          <Text
-            style={[styles.totalLabel, { color: currentColors.textSecondary }]}
-          >
-            Total
-          </Text>
-          <Text style={[styles.totalValue, { color: currentColors.text }]}>
-            ${(item.price * quantity).toFixed(2)}
-          </Text>
-        </View>
-        <Pressable
-          style={[styles.addButton, { backgroundColor: currentColors.secondary }]}
-          onPress={handleAddToCart}
-        >
-          <IconSymbol name="cart.fill" size={20} color={currentColors.background} />
-          <Text style={[styles.addButtonText, { color: currentColors.background }]}>
-            Add to Cart
-          </Text>
-        </Pressable>
+        {item.available ? (
+          <>
+            <View style={styles.totalContainer}>
+              <Text
+                style={[styles.totalLabel, { color: currentColors.textSecondary }]}
+              >
+                Total
+              </Text>
+              <Text style={[styles.totalValue, { color: currentColors.text }]}>
+                ${(item.price * quantity).toFixed(2)}
+              </Text>
+            </View>
+            <Pressable
+              style={[styles.addButton, { backgroundColor: currentColors.secondary }]}
+              onPress={handleAddToCart}
+            >
+              <IconSymbol name="cart.fill" size={20} color={currentColors.background} />
+              <Text style={[styles.addButtonText, { color: currentColors.background }]}>
+                Add to Cart
+              </Text>
+            </Pressable>
+          </>
+        ) : (
+          <Pressable style={[styles.addButton, styles.addButtonDisabled, { backgroundColor: "#CCCCCC" }]} disabled>
+            <IconSymbol name="xmark.circle.fill" size={20} color="#999999" />
+            <Text style={[styles.addButtonText, { color: "#999999" }]}>
+              Currently Unavailable
+            </Text>
+          </Pressable>
+        )}
       </View>
     </SafeAreaView>
   );
@@ -636,8 +669,49 @@ const styles = StyleSheet.create({
     boxShadow: "0px 4px 12px rgba(212, 175, 55, 0.3)",
     elevation: 4,
   },
+  addButtonDisabled: {
+    opacity: 0.7,
+  },
   addButtonText: {
     fontSize: 18,
     fontFamily: 'Inter_700Bold',
+  },
+  badgesContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+    marginBottom: 8,
+  },
+  badge: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+    gap: 4,
+  },
+  unavailableBadge: {
+    backgroundColor: "#FF6B6B",
+  },
+  badgeText: {
+    fontSize: 12,
+    fontFamily: 'Inter_600SemiBold',
+    color: "#FFFFFF",
+  },
+  unavailableNotice: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 16,
+    borderRadius: 12,
+    gap: 12,
+    marginBottom: 24,
+    borderWidth: 1,
+  },
+  unavailableNoticeText: {
+    fontSize: 16,
+    fontFamily: 'Inter_600SemiBold',
+    color: "#FFFFFF",
+    flex: 1,
   },
 });

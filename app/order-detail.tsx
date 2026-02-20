@@ -326,7 +326,7 @@ export default function OrderDetailScreen() {
             >
               <View style={styles.orderRow}>
                 <Text style={[styles.orderLabel, { color: currentColors.textSecondary }]}>Order Number</Text>
-                <Text style={[styles.orderValue, { color: currentColors.text }]}>#{order.order_number}</Text>
+                <Text style={[styles.orderValue, { color: currentColors.text }]}>#{String(order.id).substring(0, 8).toUpperCase()} - {order.order_number}</Text>
               </View>
               
               <View style={styles.orderRow}>

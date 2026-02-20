@@ -323,7 +323,6 @@ export const menuService = {
       const { data, error } = await supabase
         .from('menu_items')
         .select('*')
-        .eq('available', true)
         .order('category', { ascending: true });
 
       if (error) {
@@ -371,7 +370,7 @@ export const menuService = {
           category: item.category,
           image: item.image,
           popular: item.popular || false,
-          available: true,
+          available: item.available !== undefined ? item.available : true,
         } as any)
         .select()
         .single() as any);
@@ -398,6 +397,7 @@ export const menuService = {
           category: updates.category,
           image: updates.image,
           popular: updates.popular,
+          available: updates.available !== undefined ? updates.available : true,
           updated_at: new Date().toISOString(),
         })
         .eq('id', itemId)

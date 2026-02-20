@@ -7,82 +7,82 @@ const corsHeaders = {
 };
 
 /**
- * Get Uber OAuth token (Sandbox)
+ * ⚡ STRIPE WEBHOOK - INGEST ONLY (patched, full HTML)
+ *
+ * Changes:
+ * - Validate required env vars up-front (no non-null assertions).
+ * - Use EdgeRuntime.waitUntil(...) for background fire-and-forget work.
+ * - Defensive RPC result handling.
+ * - Avoid very large console.log dumps; log sizes/keys instead.
  */
-async function getUberAccessToken(
-  clientId: string,
-  clientSecret: string
-): Promise<string> {
-  const res = await fetch(
-    'https://sandbox-login.uber.com/oauth/v2/token',
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        client_id: clientId,
-        client_secret: clientSecret,
-        grant_type: 'client_credentials',
-        scope: 'delivery',
-      }),
-    }
-  );
-
-  if (!res.ok) {
-    throw new Error(`Uber OAuth failed: ${await res.text()}`);
-  }
-
-  const data = await res.json();
-  return data.access_token;
-}
 
 Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
-  if (req.method !== 'POST') return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405, headers: corsHeaders });
+  // Handle CORS preflight
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders });
+  }
+
+  if (req.method !== 'POST') {
+    return new Response(
+      JSON.stringify({ error: 'Method not allowed' }),
+      { status: 405, headers: corsHeaders }
+    );
+  }
+
+  const startTime = Date.now();
 
   try {
-    const supabase = createClient(
-      Deno.env.get('SUPABASE_URL')!,
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-    );
+    // --- Validate env vars early ---
+    const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
+    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+      console.error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
+      return new Response(
+        JSON.stringify({ error: 'Server misconfigured: missing Supabase credentials' }),
+        { status: 500, headers: corsHeaders }
+      );
+    }
+
+    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
     const webhookPayload = await req.json();
-    console.log('Stripe webhook received:', webhookPayload.type);
+    console.log('Stripe webhook received type:', webhookPayload?.type ?? '<unknown>');
 
     // Only handle payment success
     if (webhookPayload.type !== 'payment_intent.succeeded') {
       return new Response(JSON.stringify({ received: true }), { headers: corsHeaders });
     }
 
-    const paymentIntent = webhookPayload.data.object;
+    const paymentIntent = webhookPayload.data?.object ?? {};
     const paymentId = paymentIntent.id;
     const customerId = paymentIntent.customer;
 
-    console.log('Processing payment intent:', paymentId);
-    console.log('Customer ID:', customerId);
-    console.log('Payment metadata:', paymentIntent.metadata);
+    console.log('Processing payment intent id:', paymentId, 'customer:', customerId);
+    // Avoid logging the entire payment intent if large; log metadata summary
+    console.log('Payment metadata keys:', Object.keys(paymentIntent.metadata || {}));
 
-    // --- 🔧 FIX: Determine user_id from metadata OR customer lookup ---
+    // Determine user_id from metadata OR customer lookup
     let userId = paymentIntent.metadata?.user_id;
 
     if (!userId && customerId) {
-      console.log('⚠️ No user_id in metadata, looking up from Stripe customer...');
-      
+      console.log('No user_id in metadata, looking up from Stripe customer:', customerId);
+
       const { data: profile, error: profileError } = await supabase
         .from('user_profiles')
         .select('user_id')
         .eq('stripe_customer_id', customerId)
         .single();
-      
+
       if (profileError) {
         console.error('Error looking up user from customer:', profileError);
       } else if (profile) {
         userId = profile.user_id;
-        console.log('✓ Found user_id from customer:', userId);
+        console.log('Found user_id from customer:', userId);
       }
     }
 
     if (!userId) {
-      console.error('❌ Could not determine user_id for payment');
+      console.error('Could not determine user_id for payment:', paymentId);
       console.error('Available metadata keys:', Object.keys(paymentIntent.metadata || {}));
       throw new Error(
         'Could not determine user_id for payment. ' +
@@ -90,72 +90,68 @@ Deno.serve(async (req) => {
       );
     }
 
-    console.log('✓ Using user_id:', userId);
+    console.log('Using user_id:', userId);
 
     // --- 1️⃣ Store payment record with enhanced metadata ---
     const enhancedMetadata = {
       ...paymentIntent.metadata,
-      user_id: userId, // Ensure user_id is always in metadata
+      user_id: userId,
     };
 
     const { error: paymentInsertError } = await supabase
       .from('stripe_payments')
-      .upsert({
-        payment_id: paymentId,
-        user_id: userId,
-        amount: paymentIntent.amount,
-        currency: paymentIntent.currency,
-        status: 'succeeded',
-        payment_method: paymentIntent.payment_method,
-        metadata: enhancedMetadata, // Store enhanced metadata
-      }, {
-        onConflict: 'payment_id'
-      });
+      .upsert(
+        {
+          payment_id: paymentId,
+          user_id: userId,
+          amount: paymentIntent.amount,
+          currency: paymentIntent.currency,
+          status: 'succeeded',
+          payment_method: paymentIntent.payment_method,
+          metadata: enhancedMetadata,
+        },
+        { onConflict: 'payment_id' }
+      );
 
     if (paymentInsertError) {
       console.error('Error storing payment:', paymentInsertError);
       throw new Error('Failed to store payment record');
     }
 
-    console.log('✓ Payment record stored');
+    console.log('Payment record stored for:', paymentId);
 
     // --- 2️⃣ Create Order using RPC function ---
-    console.log('Creating order from payment...');
-    
-    const { data: orderData, error: rpcError } = await supabase
-      .rpc('create_order_from_payment', { 
-        stripe_payment_intent_id: paymentId 
-      });
+    console.log('Creating order from payment via RPC...');
+    const { data: rpcRaw, error: rpcError } = await supabase.rpc('create_order_from_payment', {
+      stripe_payment_intent_id: paymentId,
+    });
 
     if (rpcError) {
       console.error('RPC Error:', rpcError);
-      console.error('RPC Error details:', {
-        message: rpcError.message,
-        details: rpcError.details,
-        hint: rpcError.hint,
-        code: rpcError.code,
-      });
-      throw new Error(`Failed to create order: ${rpcError.message}`);
+      // Provide concise RPC error to caller
+      throw new Error(`Failed to create order: ${rpcError.message ?? 'RPC error'}`);
     }
 
-    if (!orderData) {
-      throw new Error('Failed to create order: No data returned from RPC');
+    // Defensive handling: RPC may return an object or array depending on implementation
+    const orderData = Array.isArray(rpcRaw) ? rpcRaw[0] : rpcRaw;
+    if (!orderData || typeof orderData !== 'object') {
+      console.error('RPC returned unexpected shape:', typeof rpcRaw);
+      throw new Error('Failed to create order: No valid data returned from RPC');
     }
 
-    console.log('✓ Order created:', orderData.id);
-    console.log('✓ Order type:', orderData.order_type);
+    console.log('Order created, id:', orderData.id, 'order_type:', orderData.order_type);
 
-    // Extract order details from returned JSON
+    // Build order object defensively
     const order = {
       id: orderData.id,
       user_id: orderData.user_id,
       customer_name: orderData.customer_name,
       customer_email: orderData.customer_email,
       customer_phone: orderData.customer_phone,
-      items: orderData.items,
-      subtotal: orderData.subtotal,
-      tax: orderData.tax,
-      total: orderData.total,
+      items: orderData.items ?? [],
+      subtotal: Number(orderData.subtotal ?? 0),
+      tax: Number(orderData.tax ?? 0),
+      total: Number(orderData.total ?? 0),
       delivery_address: orderData.delivery_address,
       pickup_notes: orderData.pickup_notes,
       order_type: orderData.order_type,
@@ -163,7 +159,7 @@ Deno.serve(async (req) => {
 
     const orderPayload = {
       orderId: order.id,
-      user_id: orderData.user_id,
+      user_id: order.user_id,
       customerName: order.customer_name,
       customerEmail: order.customer_email,
       customerPhone: order.customer_phone,
@@ -177,91 +173,106 @@ Deno.serve(async (req) => {
       timestamp: new Date().toISOString(),
     };
 
-    // --- 🔧 FIX: Verify FUNCTIONS_URL is set ---
-    const FUNCTIONS_URL = Deno.env.get('FUNCTIONS_URL');
-    if (!FUNCTIONS_URL) {
-      console.error('❌ FUNCTIONS_URL environment variable not set!');
-      console.error('⚠️ Skipping admin notifications');
-    } else {
-      console.log('📍 FUNCTIONS_URL:', FUNCTIONS_URL);
-    }
+    
+// --- 3️⃣ Admin Notifications (Background via EdgeRuntime.waitUntil) ---
+const FUNCTIONS_URL = Deno.env.get('FUNCTIONS_URL') || `${SUPABASE_URL}/functions/v1`;
 
-    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-    const headers = { 
-      'Content-Type': 'application/json', 
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` 
-    };
+console.log('Scheduling admin notifications (background)');
 
-    // --- 3️⃣ Admin Notifications (IMPROVED) ---
-    // Option A: Make them blocking with better error handling
-    if (FUNCTIONS_URL) {
-      console.log('📧 Sending admin notifications...');
-      
-      try {
-        const results = await Promise.allSettled([
-          fetch(`${FUNCTIONS_URL}/send-order-confirmation-email`, { 
-            method: 'POST', 
-            headers, 
-            body: JSON.stringify(orderPayload) 
-          }).then(async res => {
-            const text = await res.text();
-            if (!res.ok) {
-              throw new Error(`Email function returned ${res.status}: ${text}`);
-            }
-            return { type: 'email', response: text };
-          }),
-          fetch(`${FUNCTIONS_URL}/send-order-confirmation-sms`, { 
-            method: 'POST', 
-            headers, 
-            body: JSON.stringify(orderPayload) 
-          }).then(async res => {
-            const text = await res.text();
-            if (!res.ok) {
-              throw new Error(`SMS function returned ${res.status}: ${text}`);
-            }
-            return { type: 'sms', response: text };
-          }),
-        ]);
+const notificationHeaders = {
+  'Content-Type': 'application/json',
+  'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+  'x-provider': 'stripe-webhook',
+  'x-provider-event-id': paymentId,
+};
 
-        results.forEach((result, index) => {
-          const notifType = index === 0 ? 'email' : 'sms';
-          if (result.status === 'rejected') {
-            console.error(`❌ Admin ${notifType} notification failed:`, result.reason);
-          } else if (result.status === 'fulfilled') {
-            console.log(`✓ Admin ${notifType} notification sent:`, result.value);
-          }
-        });
-      } catch (err) {
-        console.error('❌ Error sending admin notifications:', err);
-        // Don't throw - continue processing
-      }
-    }
-
-    // --- 4️⃣ Customer Email (improved error handling) ---
-    const resendApiKey = Deno.env.get('RESEND_API_KEY');
-    if (resendApiKey && order.customer_email) {
-      console.log('📧 Sending customer email to:', order.customer_email);
-      
-      const orderNumber = order.id.substring(0, 8).toUpperCase();
-      const orderDate = new Date().toLocaleDateString('en-US', { 
-        weekday: 'long', 
-        year: 'numeric', 
-        month: 'long', 
-        day: 'numeric' 
+// Email notification
+EdgeRuntime.waitUntil(
+  (async () => {
+    try {
+      const res = await fetch(`${FUNCTIONS_URL}/send-order-confirmation-email`, {
+        method: 'POST',
+        headers: notificationHeaders,
+        body: JSON.stringify(orderPayload),
       });
       
-      // Format items for email
-      const itemsHtml = order.items.map((item: any) => `
+      if (!res.ok) {
+        try {
+          const text = await res.text();
+          console.warn('Admin email notification returned', res.status, text);
+        } catch {
+          console.warn('Admin email notification returned', res.status);
+        }
+      } else {
+        console.log('Admin email notification sent');
+      }
+    } catch (err) {
+      try {
+        console.error('Admin email notification error:', err);
+      } catch {
+        // Silently fail
+      }
+    }
+  })()
+);
+
+// SMS notification
+EdgeRuntime.waitUntil(
+  (async () => {
+    try {
+      const res = await fetch(`${FUNCTIONS_URL}/send-order-confirmation-sms`, {
+        method: 'POST',
+        headers: notificationHeaders,
+        body: JSON.stringify(orderPayload),
+      });
+      
+      if (!res.ok) {
+        try {
+          const text = await res.text();
+          console.warn('Admin SMS notification returned', res.status, text);
+        } catch {
+          console.warn('Admin SMS notification returned', res.status);
+        }
+      } else {
+        console.log('Admin SMS notification sent');
+      }
+    } catch (err) {
+      try {
+        console.error('Admin SMS notification error:', err);
+      } catch {
+        // Silently fail
+      }
+    }
+  })()
+);
+
+
+    // --- 4️⃣ Customer Email (improved error handling & background) ---
+    const resendApiKey = Deno.env.get('RESEND_API_KEY');
+    if (resendApiKey && order.customer_email) {
+      console.log('Scheduling customer email to:', order.customer_email);
+
+      const orderNumber = String(order.id).substring(0, 8).toUpperCase();
+      const orderDate = new Date().toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+      });
+
+      const itemsHtml = order.items
+        .map((item: any) => `
         <tr>
           <td style="padding: 12px 0; border-bottom: 1px solid #f0f0f0;">
             <div style="font-weight: 500; color: #1a1a1a; margin-bottom: 4px;">${item.name}</div>
             <div style="font-size: 14px; color: #666;">Qty: ${item.quantity}</div>
           </td>
           <td style="padding: 12px 0; border-bottom: 1px solid #f0f0f0; text-align: right; font-weight: 500; color: #1a1a1a;">
-            ${(item.price * item.quantity).toFixed(2)}
+            ${(Number(item.price || 0) * Number(item.quantity || 0)).toFixed(2)}
           </td>
         </tr>
-      `).join('');
+      `)
+        .join('');
 
       const emailHtml = `
 <!DOCTYPE html>
@@ -369,15 +380,6 @@ Deno.serve(async (req) => {
             </td>
           </tr>
 
-          <!-- Call to Action -->
-          <!--tr>
-            <td style="padding: 0 40px 32px; text-align: center;">
-              <a href="https://jagabansla.com/orders" style="display: inline-block; background: linear-gradient(135deg, #4AD7C2 0%, #2ab3a0 100%); color: #ffffff; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 15px; box-shadow: 0 4px 12px rgba(74, 215, 194, 0.3);">
-                Track Your Order
-              </a>
-            </td>
-          </tr-->
-
           <!-- Footer -->
           <tr>
             <td style="background-color: #1a1a1a; padding: 32px 40px; text-align: center;">
@@ -406,99 +408,90 @@ Deno.serve(async (req) => {
 </html>
       `;
 
-      try {
-        const emailResponse = await fetch('https://api.resend.com/emails', {
-          method: 'POST',
-          headers: { 
-            Authorization: `Bearer ${resendApiKey}`, 
-            'Content-Type': 'application/json' 
-          },
-          body: JSON.stringify({
-            from: 'Jagabans L.A. <info@jagabansla.com>',
-            to: [order.customer_email],
-            subject: `Order Confirmed #${orderNumber} - Jagabans L.A.`,
-            html: emailHtml,
-          }),
-        });
-        
-        const emailText = await emailResponse.text();
-        if (emailResponse.ok) {
-          console.log('✓ Customer email sent:', emailText);
-        } else {
-          console.error('❌ Customer email failed:', emailResponse.status, emailText);
-        }
-      } catch (err) {
-        console.error('❌ Customer email error:', err);
-      }
+      // Send email in background via EdgeRuntime.waitUntil
+      EdgeRuntime.waitUntil(
+        (async () => {
+          try {
+            const emailResponse = await fetch('https://api.resend.com/emails', {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${resendApiKey}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                from: 'Jagabans L.A. <info@jagabansla.com>',
+                to: [order.customer_email],
+                subject: `Order Confirmed #${orderNumber} - Jagabans L.A.`,
+                html: emailHtml,
+              }),
+            });
+
+            const emailText = await emailResponse.text();
+            if (emailResponse.ok) {
+              console.log('Customer email scheduled/sent:', emailText);
+            } else {
+              console.error('Customer email failed:', emailResponse.status, emailText);
+            }
+          } catch (err) {
+            console.error('Customer email error:', err);
+          }
+        })()
+      );
     } else {
-      if (!resendApiKey) console.log('⚠️ RESEND_API_KEY not set, skipping customer email');
-      if (!order.customer_email) console.log('⚠️ No customer email, skipping customer email');
+      if (!resendApiKey) console.log('RESEND_API_KEY not set, skipping customer email');
+      if (!order.customer_email) console.log('No customer email, skipping customer email');
     }
 
     // --- 5️⃣ Automatic Uber Direct Delivery (NEW) ---
     if (order.order_type === 'delivery' && order.delivery_address) {
       const uberClientId = Deno.env.get('UBER_CLIENT_ID');
       const uberClientSecret = Deno.env.get('UBER_CLIENT_SECRET');
-      
+
       if (uberClientId && uberClientSecret) {
-        console.log('🚗 Creating Uber Direct delivery...');
-        
+        console.log('Creating Uber Direct delivery (sync)');
+
         try {
-          // Get Uber OAuth token
           const accessToken = await getUberAccessToken(uberClientId, uberClientSecret);
-          
-          // Parse delivery address (assuming it's stored as a string)
-          // You may need to adjust this based on how delivery_address is stored
-          const deliveryAddress = order.delivery_address;
-          
-          // Restaurant pickup address (you should configure this)
-          const pickupAddress = Deno.env.get('RESTAURANT_ADDRESS') || 
-            'Your Restaurant Address, City, State ZIP, Country';
-          const pickupName = Deno.env.get('RESTAURANT_NAME') || 'Jagabans L.A.';
-          const pickupPhone = Deno.env.get('RESTAURANT_PHONE') || '+1234567890';
-          
-          // Prepare Uber Direct payload
+
           const deliveryPayload = {
             external_id: order.id,
-            
-            pickup_name: pickupName,
-            pickup_phone_number: pickupPhone,
-            pickup_address: pickupAddress,
+            pickup_name: Deno.env.get('RESTAURANT_NAME') || 'Jagabans L.A.',
+            pickup_phone_number: Deno.env.get('RESTAURANT_PHONE') || '+18182106659',
+            pickup_address: Deno.env.get('RESTAURANT_ADDRESS') || 'Your Restaurant Address, City, State ZIP, Country',
             pickup_notes: order.pickup_notes || 'Food order ready for pickup',
-            
             dropoff_name: order.customer_name,
             dropoff_phone_number: order.customer_phone,
-            dropoff_address: deliveryAddress,
+            dropoff_address: order.delivery_address,
             dropoff_notes: order.pickup_notes || '',
-            
             manifest_items: order.items.map((item: any) => ({
               name: item.name,
               quantity: item.quantity,
             })),
-            
             pickup_ready_dt: new Date().toISOString(),
           };
-          
-          console.log('Uber Direct payload:', JSON.stringify(deliveryPayload, null, 2));
-          
-          // Create Uber delivery
-          const uberResponse = await fetch(
-            'https://sandbox-api.uber.com/v1/deliveries',
-            {
-              method: 'POST',
-              headers: {
-                Authorization: `Bearer ${accessToken}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify(deliveryPayload),
-            }
-          );
-          
+
+          // Log a summarized payload only
+          console.log('Uber Direct payload summary:', {
+            external_id: deliveryPayload.external_id,
+            pickup_address: deliveryPayload.pickup_address,
+            dropoff_address: deliveryPayload.dropoff_address,
+            items_count: deliveryPayload.manifest_items.length,
+          });
+
+          const uberResponse = await fetch('https://sandbox-api.uber.com/v1/deliveries', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(deliveryPayload),
+          });
+
           const uberText = await uberResponse.text();
           if (uberResponse.ok) {
             const delivery = JSON.parse(uberText);
-            console.log('✓ Uber Direct delivery created:', delivery);
-            
+            console.log('Uber Direct delivery created:', delivery.id);
+
             // Update order with Uber delivery info
             await supabase
               .from('orders')
@@ -510,77 +503,54 @@ Deno.serve(async (req) => {
                 updated_at: new Date().toISOString(),
               })
               .eq('id', order.id);
-            
-            console.log('✓ Order updated with Uber delivery info');
+
+            console.log('Order updated with Uber delivery info');
           } else {
-            console.error('❌ Uber Direct API failed:', uberResponse.status, uberText);
+            console.error('Uber Direct API failed:', uberResponse.status, uberText);
           }
         } catch (err) {
-          console.error('❌ Uber Direct error:', err);
+          console.error('Uber Direct error:', err);
         }
       } else {
-        console.log('⚠️ Uber credentials not set, skipping delivery creation');
+        console.log('Uber credentials not set, skipping delivery creation');
       }
     }
 
-    // --- 5️⃣ Automatic DoorDash Delivery (DISABLED) ---
-    /*
-    if (order.order_type === 'delivery' && order.delivery_address) {
-      const doordashApiUrl = Deno.env.get('DOORDASH_API_URL');
-      const doordashApiKey = Deno.env.get('DOORDASH_API_KEY');
-      
-      if (doordashApiUrl && doordashApiKey) {
-        console.log('🚗 Creating DoorDash delivery...');
-        
-        try {
-          const ddResponse = await fetch(doordashApiUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${doordashApiKey}`,
-            },
-            body: JSON.stringify({
-              order_id: order.id,
-              customer_name: order.customer_name,
-              customer_phone: order.customer_phone,
-              delivery_address: order.delivery_address,
-              items: order.items,
-              notes: order.pickup_notes,
-            }),
-          });
-          
-          const ddText = await ddResponse.text();
-          if (ddResponse.ok) {
-            console.log('✓ DoorDash delivery created:', ddText);
-          } else {
-            console.error('❌ DoorDash API failed:', ddResponse.status, ddText);
-          }
-        } catch (err) {
-          console.error('❌ DoorDash error:', err);
-        }
-      } else {
-        console.log('⚠️ DoorDash credentials not set, skipping delivery creation');
-      }
-    }
-    */
+    // Response
+    const durationMs = Date.now() - startTime;
+    console.log('Webhook processed in', durationMs, 'ms for payment', paymentId);
 
-    return new Response(
-      JSON.stringify({ 
-        success: true, 
-        orderId: order.id 
-      }), 
-      { headers: corsHeaders }
-    );
-
+    return new Response(JSON.stringify({ success: true, orderId: order.id }), {
+      headers: corsHeaders,
+    });
   } catch (err: any) {
-    console.error('❌ Error processing webhook:', err);
-    console.error('Error message:', err.message);
-    console.error('Error stack:', err.stack);
-    return new Response(
-      JSON.stringify({ 
-        error: err.message || 'Webhook processing failed' 
-      }), 
-      { status: 500, headers: corsHeaders }
-    );
+    console.error('Error processing webhook:', err?.message ?? err);
+    console.error('Error stack:', err?.stack ?? '<no stack>');
+    return new Response(JSON.stringify({ error: err?.message ?? 'Webhook processing failed' }), {
+      status: 500,
+      headers: corsHeaders,
+    });
   }
 });
+
+// Helper: Uber OAuth
+async function getUberAccessToken(clientId: string, clientSecret: string): Promise<string> {
+  const authString = btoa(`${clientId}:${clientSecret}`);
+
+  const tokenResponse = await fetch('https://login.uber.com/oauth/v2/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Authorization: `Basic ${authString}`,
+    },
+    body: 'grant_type=client_credentials&scope=delivery.read%20delivery.write',
+  });
+
+  if (!tokenResponse.ok) {
+    const errorText = await tokenResponse.text();
+    throw new Error(`Failed to get Uber access token: ${tokenResponse.status} ${errorText}`);
+  }
+
+  const tokenData = await tokenResponse.json();
+  return tokenData.access_token;
+}

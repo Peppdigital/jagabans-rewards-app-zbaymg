@@ -1,0 +1,23 @@
+# Cron Job Configuration for Payment Processing
+# Deploy with: supabase functions deploy process-pending-payments --no-verify
+
+# This file tells Supabase to run the payment processor every 30 seconds
+
+functions:
+  - name: process-pending-payments
+    definition:
+      sql: >
+        select
+          cron.schedule(
+            'process-pending-payments',
+            '*/30 * * * * *',  -- Every 30 seconds
+            $$
+            select
+              net.http_post(
+                url:='https://' || current_setting('app.supabase_url') || '/functions/v1/process-pending-payments',
+                headers:='{"Authorization": "Bearer ' || current_setting('app.supabase_service_role_key') || '", "Content-Type": "application/json"}'::jsonb,
+                body:='{"action": "process"}'::jsonb
+              ) as request_id;
+            $$
+          ) as cron_id;
+      description: "Trigger payment event processor every 30 seconds"

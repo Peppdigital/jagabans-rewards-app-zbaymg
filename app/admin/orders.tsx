@@ -178,7 +178,7 @@ export default function AdminOrderManagement() {
           const statusMessage = getStatusMessage(newStatus);
           await notificationService.createNotification({
             userId,
-            title: `Order #${transformedOrder.orderNumber} ${newStatus.charAt(0).toUpperCase() + newStatus.slice(1)}`,
+            title: `Order #${String(transformedOrder.id).substring(0, 8).toUpperCase()} - ${transformedOrder.orderNumber} ${newStatus.charAt(0).toUpperCase() + newStatus.slice(1)}`,
             message: statusMessage,
             type: 'order',
             actionUrl: '/order-history',

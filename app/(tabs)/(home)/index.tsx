@@ -13,6 +13,7 @@ import {
   TextInput,
   Modal,
   Animated,
+  RefreshControl,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
@@ -54,6 +55,7 @@ export default function HomeScreen() {
   const { currentColors, menuItems, loadMenuItems, addToCart, getUnreadNotificationCount } = useApp();
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [headerImage, setHeaderImage] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [showCategoryDropdown, setShowCategoryDropdown] = useState(false);
@@ -101,6 +103,9 @@ export default function HomeScreen() {
   }, [menuItems.length, loadMenuItems]);
 
   const filteredItems = menuItems.filter((item) => {
+    // Filter by availability - only hide items explicitly marked as unavailable
+    if (item.available === false) return false;
+    
     // Filter by search query
     const matchesSearch = searchQuery.trim() === "" || 
       item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -154,6 +159,20 @@ export default function HomeScreen() {
     console.log("Toggle category dropdown");
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setShowCategoryDropdown(!showCategoryDropdown);
+  };
+
+  const handleRefresh = async () => {
+    console.log("Refreshing menu items");
+    setRefreshing(true);
+    try {
+      await loadMenuItems();
+      showToast("success", "Menu refreshed");
+    } catch (error) {
+      console.error("Error refreshing menu:", error);
+      showToast("error", "Failed to refresh menu");
+    } finally {
+      setRefreshing(false);
+    }
   };
 
   return (
@@ -336,6 +355,14 @@ export default function HomeScreen() {
         showsVerticalScrollIndicator={false}
         onScroll={handleScroll}
         scrollEventThrottle={16}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+            tintColor="#5FE8D0"
+            colors={["#5FE8D0", "#F5A623"]}
+          />
+        }
       >
         {/* Categories - Hidden when collapsed */}
         {!categoriesCollapsed && (
