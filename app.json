@@ -2,7 +2,7 @@
   "expo": {
     "name": "Ooosum Foods LLC",
     "slug": "ooosum-foods-llc",
-    "version": "1.4.0",
+    "version": "1.4.1",
     "orientation": "portrait",
     "icon": "./assets/images/jagabans-circle.png",
     "userInterfaceStyle": "automatic",
@@ -32,16 +32,6 @@
       "bundler": "metro"
     },
     "plugins": [
-      // [
-      //   "expo-build-properties",
-      //   {
-      //     "ios": {
-      //       "entitlements": {
-      //         "com.apple.developer.in-app-payments": "merchant.com.ooosumfoods.jagabansla"
-      //       }
-      //     }
-      //   }
-      // ],
       "expo-font",
       "expo-router",
       "expo-web-browser"
@@ -55,7 +45,12 @@
       "eas": {
         "projectId": "94e71267-25cb-411f-88e6-37bafccde801"
       }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/94e71267-25cb-411f-88e6-37bafccde801"
     }
-  },
-  // "scheme": "jagabansla"
+  }
 }
