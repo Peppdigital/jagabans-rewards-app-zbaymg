@@ -1109,7 +1109,7 @@ const proceedWithPayment = useCallback(async () => {
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Order Type</Text>
               <View style={styles.orderTypeSelector}>
-                {/* <LinearGradient
+                <LinearGradient
                   colors={orderType === 'delivery' 
                     ? [currentColors.secondary, currentColors.highlight]
                     : [currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]
@@ -1145,7 +1145,7 @@ const proceedWithPayment = useCallback(async () => {
                       Delivery
                     </Text>
                   </Pressable>
-                </LinearGradient> */}
+                </LinearGradient>
 
                 <LinearGradient
                   colors={orderType === 'pickup' 
