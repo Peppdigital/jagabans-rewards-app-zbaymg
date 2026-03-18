@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from "react";
 import {
   View,
@@ -8,6 +7,7 @@ import {
   Pressable,
   ScrollView,
   Animated,
+  Platform,
 } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -15,6 +15,7 @@ import { useApp } from "@/contexts/AppContext";
 import { IconSymbol } from "@/components/IconSymbol";
 import * as Haptics from "expo-haptics";
 import { MenuItem } from "@/types";
+import { isLosAngelesMonday } from "@/utils/mondayBlock";
 
 export default function ItemDetailScreen() {
   const { id } = useLocalSearchParams();
@@ -23,6 +24,9 @@ export default function ItemDetailScreen() {
   const [quantity, setQuantity] = useState(1);
   const [item, setItem] = useState<MenuItem | null>(null);
   const [lastAddedQuantity, setLastAddedQuantity] = useState(1);
+
+  // Monday ordering block
+  const isMonday = isLosAngelesMonday();
 
   // Notification state
   const [showNotification, setShowNotification] = useState(false);
@@ -174,15 +178,49 @@ export default function ItemDetailScreen() {
   };
 
   const handleAddToCart = () => {
-    const addedQuantity = quantity; // capture current quantity
-    console.log("Adding to cart:", item.name, addedQuantity);
+    if (isMonday) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      // Reuse the toast to show the Monday closure message
+      setLastAddedQuantity(0); // signals "closed" state — not used for display here
+      setShowNotification(true);
+      Animated.parallel([
+        Animated.timing(notificationOpacity, {
+          toValue: 1,
+          duration: 300,
+          useNativeDriver: true,
+        }),
+        Animated.spring(notificationTranslateY, {
+          toValue: 0,
+          tension: 50,
+          friction: 7,
+          useNativeDriver: true,
+        }),
+      ]).start();
+      setTimeout(() => {
+        Animated.parallel([
+          Animated.timing(notificationOpacity, {
+            toValue: 0,
+            duration: 300,
+            useNativeDriver: true,
+          }),
+          Animated.timing(notificationTranslateY, {
+            toValue: -100,
+            duration: 300,
+            useNativeDriver: true,
+          }),
+        ]).start(() => {
+          setShowNotification(false);
+          notificationTranslateY.setValue(-100);
+        });
+      }, 3000);
+      return;
+    }
 
+    const addedQuantity = quantity;
+    console.log("Adding to cart:", item.name, addedQuantity);
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     addToCart({ ...item, quantity: addedQuantity });
-
-    // Pass the correct quantity to toast
     showNotificationToast(addedQuantity);
-
     setQuantity(1);
   };
 
@@ -191,6 +229,9 @@ export default function ItemDetailScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     router.back();
   };
+
+  // Derived: item is orderable only when available AND not Monday
+  const canOrder = item.available && !isMonday;
 
   return (
     <SafeAreaView
@@ -224,7 +265,7 @@ export default function ItemDetailScreen() {
           style={[
             styles.notification,
             {
-              backgroundColor: currentColors.secondary,
+              backgroundColor: isMonday ? '#8B0000' : currentColors.secondary,
               opacity: notificationOpacity,
               transform: [{ translateY: notificationTranslateY }],
             },
@@ -234,31 +275,35 @@ export default function ItemDetailScreen() {
             <View
               style={[
                 styles.notificationIcon,
-                { backgroundColor: currentColors.background },
+                { backgroundColor: isMonday ? '#FFE4E4' : currentColors.background },
               ]}
             >
               <IconSymbol
-                name="checkmark.circle.fill"
+                name={isMonday
+                  ? (Platform.OS === 'ios' ? "moon.fill" : "nightlight")
+                  : "checkmark.circle.fill"}
                 size={24}
-                color={currentColors.secondary}
+                color={isMonday ? '#8B0000' : currentColors.secondary}
               />
             </View>
             <View style={styles.notificationText}>
               <Text
                 style={[
                   styles.notificationTitle,
-                  { color: currentColors.background },
+                  { color: '#FFFFFF' },
                 ]}
               >
-                Added to Cart!
+                {isMonday ? "We're Closed Today" : "Added to Cart!"}
               </Text>
               <Text
                 style={[
                   styles.notificationSubtitle,
-                  { color: currentColors.background },
+                  { color: '#FFFFFF' },
                 ]}
               >
-                {lastAddedQuantity} {item.name}
+                {isMonday
+                  ? "Online ordering is unavailable on Mondays."
+                  : `${lastAddedQuantity} ${item.name}`}
               </Text>
             </View>
           </View>
@@ -285,6 +330,16 @@ export default function ItemDetailScreen() {
                   <View style={[styles.badge, styles.unavailableBadge]}>
                     <IconSymbol name="xmark.circle.fill" size={14} color="#FFFFFF" />
                     <Text style={styles.badgeText}>Unavailable</Text>
+                  </View>
+                )}
+                {isMonday && (
+                  <View style={[styles.badge, styles.mondayBadge]}>
+                    <IconSymbol
+                      name={Platform.OS === 'ios' ? "moon.fill" : "nightlight"}
+                      size={14}
+                      color="#FFFFFF"
+                    />
+                    <Text style={styles.badgeText}>Closed Mondays</Text>
                   </View>
                 )}
                 {item.popular && (
@@ -340,7 +395,20 @@ export default function ItemDetailScreen() {
             </View>
           )}
 
-          {item.available && (
+          {isMonday && item.available && (
+            <View style={styles.mondayNotice}>
+              <IconSymbol
+                name={Platform.OS === 'ios' ? "moon.fill" : "nightlight"}
+                size={20}
+                color="#FFFFFF"
+              />
+              <Text style={styles.mondayNoticeText}>
+                We're closed on Mondays. Come back Tuesday!
+              </Text>
+            </View>
+          )}
+
+          {canOrder && (
             <View
               style={[styles.infoCard, { backgroundColor: currentColors.card, borderColor: currentColors.border }]}
             >
@@ -355,7 +423,7 @@ export default function ItemDetailScreen() {
             </View>
           )}
 
-          {item.available && (
+          {canOrder && (
             <View
               style={[
                 styles.quantitySection,
@@ -412,7 +480,7 @@ export default function ItemDetailScreen() {
           },
         ]}
       >
-        {item.available ? (
+        {canOrder ? (
           <>
             <View style={styles.totalContainer}>
               <Text
@@ -434,6 +502,17 @@ export default function ItemDetailScreen() {
               </Text>
             </Pressable>
           </>
+        ) : isMonday ? (
+          <Pressable style={[styles.addButton, styles.addButtonDisabled, { backgroundColor: '#2A1A1A' }]} disabled>
+            <IconSymbol
+              name={Platform.OS === 'ios' ? "moon.fill" : "nightlight"}
+              size={20}
+              color="#888888"
+            />
+            <Text style={[styles.addButtonText, { color: "#888888" }]}>
+              Closed — Back Tuesday
+            </Text>
+          </Pressable>
         ) : (
           <Pressable style={[styles.addButton, styles.addButtonDisabled, { backgroundColor: "#CCCCCC" }]} disabled>
             <IconSymbol name="xmark.circle.fill" size={20} color="#999999" />
@@ -671,6 +750,8 @@ const styles = StyleSheet.create({
   },
   addButtonDisabled: {
     opacity: 0.7,
+    boxShadow: 'none',
+    elevation: 0,
   },
   addButtonText: {
     fontSize: 18,
@@ -694,6 +775,9 @@ const styles = StyleSheet.create({
   unavailableBadge: {
     backgroundColor: "#FF6B6B",
   },
+  mondayBadge: {
+    backgroundColor: "#6B3A3A",
+  },
   badgeText: {
     fontSize: 12,
     fontFamily: 'Inter_600SemiBold',
@@ -712,6 +796,23 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontFamily: 'Inter_600SemiBold',
     color: "#FFFFFF",
+    flex: 1,
+  },
+  mondayNotice: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 16,
+    borderRadius: 12,
+    gap: 12,
+    marginBottom: 24,
+    borderWidth: 1,
+    backgroundColor: '#3A1A1A',
+    borderColor: '#8B3A3A',
+  },
+  mondayNoticeText: {
+    fontSize: 16,
+    fontFamily: 'Inter_600SemiBold',
+    color: "#FFCCCC",
     flex: 1,
   },
 });

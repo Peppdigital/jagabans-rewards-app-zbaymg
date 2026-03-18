@@ -42,7 +42,7 @@ const MAPPING = ({
   "square.and.arrow.down": "save",
 
   // Admin Dashboard Specific Icons
-  "shield.lefthalf.filled": "admin-panel-settings",
+  // "shield.lefthalf.filled": "admin-panel-settings",
   "shield.checkered": "verified",
   "fork.knife": "restaurant-menu",
   "receipt": "receipt-long",
@@ -158,6 +158,7 @@ const MAPPING = ({
   "bag.fill": "shopping-bag",
   "gift.fill": "card-giftcard",
   "gift": "card-giftcard",
+  "scooter": "delivery-dining",
 
   // Location & Maps
   "location.fill": "location-on",
@@ -206,7 +207,7 @@ const MAPPING = ({
   "clock.badge.checkmark": "schedule",
 
   // Authentication & Security
-  "rectangle.and.arrow.up.right.and.arrow.down.left": "logout",
+  "rectangle.portrait.and.arrow.forward": "logout",
 
   // Fallback mappings (keep existing MaterialIcons names working)
   "receipt-long": "receipt-long",
@@ -217,9 +218,9 @@ const MAPPING = ({
   "restaurant-menu": "restaurant-menu",
   "event-seat": "event-seat",
   "people": "people",
-  "admin-panel-settings": "admin-panel-settings",
+  // "person.badge.shield.checkmark": "admin-panel-settings",
   "verified": "verified",
-  "shopping-bag": "shopping-bag",
+  // "bag.fill": "shopping-bag",
   "card-giftcard": "card-giftcard",
   "notifications": "notifications",
   "analytics": "analytics",

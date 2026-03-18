@@ -787,7 +787,7 @@ export default function ProfileScreen() {
                   <View
                     style={[styles.menuIcon, { backgroundColor: "#FF9800" + "20" }]}
                   >
-                    <IconSymbol name="admin-panel-settings" size={24} color="#FF9800" />
+                    <IconSymbol name="person.badge.shield.checkmark" size={24} color="#FF9800" />
                   </View>
                   <View style={styles.menuContent}>
                     <Text style={[styles.menuTitle, { color: currentColors.text }]}>
@@ -1091,7 +1091,7 @@ export default function ProfileScreen() {
                 <View
                   style={[styles.menuIcon, { backgroundColor: "#FF9800" + "20" }]}
                 >
-                  <IconSymbol name="logout" size={24} color="#FF9800" />
+                  <IconSymbol name="rectangle.portrait.and.arrow.forward" size={24} color="#FF9800" />
                 </View>
                 <View style={styles.menuContent}>
                   <Text style={[styles.menuTitle, { color: currentColors.text }]}>

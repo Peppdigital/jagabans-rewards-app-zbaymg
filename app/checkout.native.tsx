@@ -1134,7 +1134,7 @@ const proceedWithPayment = useCallback(async () => {
                     disabled={processing}
                   >
                     <IconSymbol 
-                      name="delivery-dining" 
+                      name="scooter" 
                       size={20} 
                       color={orderType === 'delivery' ? currentColors.background : currentColors.text} 
                     />
@@ -1172,7 +1172,7 @@ const proceedWithPayment = useCallback(async () => {
                     disabled={processing}
                   >
                     <IconSymbol 
-                      name="shopping-bag" 
+                      name="bag.fill" 
                       size={20} 
                       color={orderType === 'pickup' ? currentColors.background : currentColors.text} 
                     />

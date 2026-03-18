@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from 'react';
 import {
   View,
@@ -20,11 +19,15 @@ import { reservationService, ReservationInput } from '@/services/reservationServ
 import Toast from '@/components/Toast';
 import * as Haptics from 'expo-haptics';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import { isLosAngelesMonday } from '@/utils/mondayBlock';
 
 export default function ReservationsScreen() {
   const router = useRouter();
   const { currentColors, userProfile, showToast } = useApp();
   const { isAuthenticated } = useAuth();
+
+  // Monday reservation block
+  const isMonday = isLosAngelesMonday();
 
   // Form state
   const [name, setName] = useState(userProfile?.name || '');
@@ -75,6 +78,14 @@ export default function ReservationsScreen() {
   };
 
   const handleSubmit = async () => {
+    if (isMonday) {
+      if (Platform.OS !== 'web') {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      }
+      showToast("We're closed on Mondays. Reservations reopen Tuesday.", 'error');
+      return;
+    }
+
     if (Platform.OS !== 'web') {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     }
@@ -200,6 +211,20 @@ export default function ReservationsScreen() {
           <View style={{ width: 40 }} />
         </LinearGradient>
 
+        {/* Monday Closure Banner */}
+        {isMonday && (
+          <View style={styles.mondayBanner}>
+            <IconSymbol
+              name={Platform.OS === 'ios' ? 'moon.fill' : 'nightlight'}
+              size={16}
+              color="#5FE8D0"
+            />
+            <Text style={styles.mondayBannerText}>
+              We're closed today. Reservations reopen Tuesday.
+            </Text>
+          </View>
+        )}
+
         <ScrollView
           style={styles.container}
           contentContainerStyle={styles.content}
@@ -213,7 +238,11 @@ export default function ReservationsScreen() {
             ]}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
-            style={[styles.formCard, { borderColor: currentColors.border }]}
+            style={[
+              styles.formCard,
+              { borderColor: currentColors.border },
+              isMonday && styles.formCardDisabled,
+            ]}
           >
             <Text style={[styles.sectionTitle, { color: currentColors.text }]}>
               Reservation Details
@@ -232,7 +261,7 @@ export default function ReservationsScreen() {
                   placeholderTextColor={currentColors.textSecondary}
                   value={name}
                   onChangeText={setName}
-                  editable={!loading}
+                  editable={!loading && !isMonday}
                 />
               </View>
             </View>
@@ -252,7 +281,7 @@ export default function ReservationsScreen() {
                   onChangeText={setEmail}
                   keyboardType="email-address"
                   autoCapitalize="none"
-                  editable={!loading}
+                  editable={!loading && !isMonday}
                 />
               </View>
             </View>
@@ -271,7 +300,7 @@ export default function ReservationsScreen() {
                   value={phone}
                   onChangeText={setPhone}
                   keyboardType="phone-pad"
-                  editable={!loading}
+                  editable={!loading && !isMonday}
                 />
               </View>
             </View>
@@ -283,12 +312,13 @@ export default function ReservationsScreen() {
               </Text>
               <Pressable
                 onPress={() => {
+                  if (isMonday || loading) return;
                   if (Platform.OS !== 'web') {
                     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                   }
                   setShowDatePicker(true);
                 }}
-                disabled={loading}
+                disabled={loading || isMonday}
               >
                 <View style={[styles.inputContainer, { borderColor: currentColors.border }]}>
                   <IconSymbol name="calendar" size={20} color={currentColors.textSecondary} />
@@ -326,12 +356,13 @@ export default function ReservationsScreen() {
               </Text>
               <Pressable
                 onPress={() => {
+                  if (isMonday || loading) return;
                   if (Platform.OS !== 'web') {
                     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                   }
                   setShowTimePicker(true);
                 }}
-                disabled={loading}
+                disabled={loading || isMonday}
               >
                 <View style={[styles.inputContainer, { borderColor: currentColors.border }]}>
                   <IconSymbol name="clock" size={20} color={currentColors.textSecondary} />
@@ -374,7 +405,7 @@ export default function ReservationsScreen() {
                   value={guests}
                   onChangeText={setGuests}
                   keyboardType="number-pad"
-                  editable={!loading}
+                  editable={!loading && !isMonday}
                 />
               </View>
             </View>
@@ -400,32 +431,45 @@ export default function ReservationsScreen() {
                   multiline
                   numberOfLines={4}
                   textAlignVertical="top"
-                  editable={!loading}
+                  editable={!loading && !isMonday}
                 />
               </View>
             </View>
 
             {/* Submit Button */}
-            <LinearGradient
-              colors={[currentColors.secondary, currentColors.highlight]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.submitButton}
-            >
-              <Pressable
-                style={styles.submitButtonInner}
-                onPress={handleSubmit}
-                disabled={loading}
+            {isMonday ? (
+              <View style={styles.mondaySubmitBlock}>
+                <IconSymbol
+                  name={Platform.OS === 'ios' ? 'moon.fill' : 'nightlight'}
+                  size={20}
+                  color="#888888"
+                />
+                <Text style={styles.mondaySubmitText}>
+                  Reservations unavailable on Mondays
+                </Text>
+              </View>
+            ) : (
+              <LinearGradient
+                colors={[currentColors.secondary, currentColors.highlight]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+                style={styles.submitButton}
               >
-                {loading ? (
-                  <ActivityIndicator size="small" color={currentColors.background} />
-                ) : (
-                  <Text style={[styles.submitButtonText, { color: currentColors.background }]}>
-                    Make Reservation
-                  </Text>
-                )}
-              </Pressable>
-            </LinearGradient>
+                <Pressable
+                  style={styles.submitButtonInner}
+                  onPress={handleSubmit}
+                  disabled={loading}
+                >
+                  {loading ? (
+                    <ActivityIndicator size="small" color={currentColors.background} />
+                  ) : (
+                    <Text style={[styles.submitButtonText, { color: currentColors.background }]}>
+                      Make Reservation
+                    </Text>
+                  )}
+                </Pressable>
+              </LinearGradient>
+            )}
           </LinearGradient>
 
           {/* User's Reservations */}
@@ -556,6 +600,23 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 2 },
     textShadowRadius: 4,
   },
+  mondayBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    backgroundColor: '#1a303a',
+    borderBottomWidth: 1,
+    borderBottomColor: '#5FE8D0',
+  },
+  mondayBannerText: {
+    fontSize: 13,
+    fontFamily: 'LibertinusSans_700Bold',
+    color: '#5FE8D0',
+    flexShrink: 1,
+  },
   container: {
     flex: 1,
   },
@@ -571,6 +632,9 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.3)',
     elevation: 8,
+  },
+  formCardDisabled: {
+    opacity: 0.6,
   },
   sectionTitle: {
     fontSize: 22,
@@ -625,6 +689,22 @@ const styles = StyleSheet.create({
   submitButtonText: {
     fontSize: 18,
     fontFamily: 'Inter_700Bold',
+  },
+  mondaySubmitBlock: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingVertical: 16,
+    marginTop: 8,
+    borderWidth: 2,
+    borderColor: '#555555',
+    backgroundColor: 'rgba(255,255,255,0.04)',
+  },
+  mondaySubmitText: {
+    fontSize: 16,
+    fontFamily: 'Inter_600SemiBold',
+    color: '#888888',
   },
   reservationsSection: {
     marginTop: 8,

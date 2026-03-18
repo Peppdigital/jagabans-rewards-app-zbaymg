@@ -1,4 +1,3 @@
-
 import { useState, useEffect, useRef } from "react";
 import {
   View,
@@ -24,6 +23,7 @@ import { imageService } from "@/services/supabaseService";
 import Toast from "@/components/Toast";
 import { LinearGradient } from "expo-linear-gradient";
 import { BlurView } from "expo-blur";
+import { isLosAngelesMonday } from "@/utils/mondayBlock";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
@@ -62,7 +62,10 @@ export default function HomeScreen() {
   const [categoriesCollapsed, setCategoriesCollapsed] = useState(false);
   const scrollViewRef = useRef<ScrollView>(null);
   const categoryScrollY = useRef(0);
-  
+
+  // Monday ordering block
+  const isMonday = isLosAngelesMonday();
+
   // Toast state
   const [toastVisible, setToastVisible] = useState(false);
   const [toastMessage, setToastMessage] = useState("");
@@ -105,15 +108,15 @@ export default function HomeScreen() {
   const filteredItems = menuItems.filter((item) => {
     // Filter by availability - only hide items explicitly marked as unavailable
     if (item.available === false) return false;
-    
+
     // Filter by search query
-    const matchesSearch = searchQuery.trim() === "" || 
+    const matchesSearch = searchQuery.trim() === "" ||
       item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       item.description.toLowerCase().includes(searchQuery.toLowerCase());
-    
+
     // Filter by category
     const matchesCategory = selectedCategory === "All" || item.category === selectedCategory;
-    
+
     return matchesSearch && matchesCategory;
   });
 
@@ -131,8 +134,13 @@ export default function HomeScreen() {
   };
 
   const handleAddToCart = (item: any) => {
-    console.log("Adding to cart:", item.name, 1);
+    if (isMonday) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      showToast("error", "We're closed on Mondays. See you Tuesday!");
+      return;
+    }
 
+    console.log("Adding to cart:", item.name, 1);
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     addToCart({ ...item, quantity: 1 });
     showToast("success", `1 ${item.name} Added to cart`);
@@ -146,7 +154,7 @@ export default function HomeScreen() {
 
   const handleScroll = (event: any) => {
     const currentScrollY = event.nativeEvent.contentOffset.y;
-    
+
     // Collapse categories when scrolled past them (approximately 80px)
     if (currentScrollY > 80 && !categoriesCollapsed) {
       setCategoriesCollapsed(true);
@@ -208,14 +216,14 @@ export default function HomeScreen() {
           end={{ x: 1, y: 0 }}
           style={styles.headerBackground}
         />
-        
+
         {/* Content Layer (Logo and Notification Bell) - Fully Opaque */}
         <SafeAreaView edges={['top']} style={styles.headerSafeArea}>
           <View style={styles.header}>
             <View style={styles.headerContent}>
               {headerImage ? (
-                <Image 
-                  source={{ uri: headerImage }} 
+                <Image
+                  source={{ uri: headerImage }}
                   style={styles.logo}
                   tintColor="#5FE8D0"
                 />
@@ -230,7 +238,7 @@ export default function HomeScreen() {
                 </View>
               )}
             </View>
-            <Pressable 
+            <Pressable
               onPress={() => router.push("/notifications")}
               style={styles.notificationButton}
             >
@@ -250,6 +258,20 @@ export default function HomeScreen() {
           </View>
         </SafeAreaView>
       </View>
+
+      {/* Monday Closure Banner */}
+      {isMonday && (
+        <View style={styles.mondayBanner}>
+          <IconSymbol
+            name={Platform.OS === 'ios' ? "moon.fill" : "nightlight"}
+            size={16}
+            color="#5FE8D0"
+          />
+          <Text style={styles.mondayBannerText}>
+            We're closed today (Monday). Online ordering resumes Tuesday.
+          </Text>
+        </View>
+      )}
 
       {/* Search Bar with Category Dropdown */}
       <View style={styles.searchContainer}>
@@ -277,10 +299,10 @@ export default function HomeScreen() {
               />
             </Pressable>
           )}
-          
+
           {/* Category Dropdown Button (visible when collapsed) */}
           {categoriesCollapsed && (
-            <Pressable 
+            <Pressable
               onPress={toggleCategoryDropdown}
               style={styles.categoryDropdownButton}
             >
@@ -301,7 +323,7 @@ export default function HomeScreen() {
         animationType="fade"
         onRequestClose={() => setShowCategoryDropdown(false)}
       >
-        <Pressable 
+        <Pressable
           style={styles.modalOverlay}
           onPress={() => setShowCategoryDropdown(false)}
         >
@@ -373,57 +395,57 @@ export default function HomeScreen() {
               style={styles.categoriesContainer}
               contentContainerStyle={styles.categoriesContent}
             >
-            {menuCategories.map((category) => (
-              <Pressable
-                key={category}
-                style={[
-                  styles.categoryButton,
-                  {
-                    backgroundColor: selectedCategory === category ? '#F5A623' : '#1a303aff',
-                    borderColor: selectedCategory === category ? '#F5A623' : '#4AD7C2',
-                    paddingHorizontal: getResponsivePadding(16),
-                    paddingVertical: getResponsivePadding(10),
-                  },
-                ]}
-                onPress={() => handleCategoryPress(category)}
-              >
-                <Text
+              {menuCategories.map((category) => (
+                <Pressable
+                  key={category}
                   style={[
-                    styles.categoryText,
+                    styles.categoryButton,
                     {
-                      color: selectedCategory === category ? '#1A5A3E' : '#FFFFFF',
-                      fontSize: getResponsiveFontSize(13),
+                      backgroundColor: selectedCategory === category ? '#F5A623' : '#1a303aff',
+                      borderColor: selectedCategory === category ? '#F5A623' : '#4AD7C2',
+                      paddingHorizontal: getResponsivePadding(16),
+                      paddingVertical: getResponsivePadding(10),
                     },
                   ]}
-                  numberOfLines={1}
-                  adjustsFontSizeToFit
-                  minimumFontScale={0.8}
+                  onPress={() => handleCategoryPress(category)}
                 >
-                  {category}
-                </Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-    
-    {/* Left fade overlay */}
-    <LinearGradient
-      colors={['rgba(13, 26, 43, 0.9)', 'transparent']}
-      start={{ x: 0, y: 0 }}
-      end={{ x: 1, y: 0 }}
-      style={styles.categoryFadeLeft}
-      pointerEvents="none"
-    />
-    
-    {/* Right fade overlay */}
-    <LinearGradient
-      colors={['transparent', 'rgba(13, 26, 43, 0.9)']}
-      start={{ x: 0, y: 0 }}
-      end={{ x: 1, y: 0 }}
-      style={styles.categoryFadeRight}
-      pointerEvents="none"
-    />
-  </View>
-)}
+                  <Text
+                    style={[
+                      styles.categoryText,
+                      {
+                        color: selectedCategory === category ? '#1A5A3E' : '#FFFFFF',
+                        fontSize: getResponsiveFontSize(13),
+                      },
+                    ]}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.8}
+                  >
+                    {category}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+
+            {/* Left fade overlay */}
+            <LinearGradient
+              colors={['rgba(13, 26, 43, 0.9)', 'transparent']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={styles.categoryFadeLeft}
+              pointerEvents="none"
+            />
+
+            {/* Right fade overlay */}
+            <LinearGradient
+              colors={['transparent', 'rgba(13, 26, 43, 0.9)']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={styles.categoryFadeRight}
+              pointerEvents="none"
+            />
+          </View>
+        )}
 
         {/* Menu Items */}
         {loading || menuItems.length === 0 ? (
@@ -497,7 +519,10 @@ export default function HomeScreen() {
                           ${item.price.toFixed(2)}
                         </Text>
                         <Pressable
-                          style={styles.addButton}
+                          style={[
+                            styles.addButton,
+                            isMonday && styles.addButtonDisabled,
+                          ]}
                           onPress={(e) => {
                             e.stopPropagation();
                             handleAddToCart(item);
@@ -506,7 +531,7 @@ export default function HomeScreen() {
                           <IconSymbol
                             name={Platform.OS === 'ios' ? "plus" : "add"}
                             size={20}
-                            color="#5FE8D0"
+                            color={isMonday ? '#666666' : '#5FE8D0'}
                           />
                         </Pressable>
                       </View>
@@ -606,6 +631,23 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     fontFamily: 'LibertinusSans_700Bold',
     color: '#0D1A2B',
+  },
+  mondayBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    backgroundColor: '#1a303a',
+    borderBottomWidth: 1,
+    borderBottomColor: '#5FE8D0',
+  },
+  mondayBannerText: {
+    fontSize: 13,
+    fontFamily: 'LibertinusSans_700Bold',
+    color: '#5FE8D0',
+    flexShrink: 1,
   },
   searchContainer: {
     paddingHorizontal: 20,
@@ -810,7 +852,6 @@ const styles = StyleSheet.create({
     marginBottom: 18,
     lineHeight: 24,
     color: '#ffffffcc',
-    // letterSpacing: 0.01,
   },
   menuItemFooter: {
     flexDirection: "row",
@@ -832,6 +873,10 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
     borderWidth: 1,
     borderColor: '#5FE8D0',
+  },
+  addButtonDisabled: {
+    borderColor: '#444444',
+    opacity: 0.5,
   },
   categoriesWrapper: {
     position: 'relative',
