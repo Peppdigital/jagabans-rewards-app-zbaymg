@@ -42,7 +42,7 @@ const MAPPING = ({
   "square.and.arrow.down": "save",
 
   // Admin Dashboard Specific Icons
-  // "shield.lefthalf.filled": "admin-panel-settings",
+  "shield.lefthalf.filled": "admin-panel-settings",
   "shield.checkered": "verified",
   "fork.knife": "restaurant-menu",
   "receipt": "receipt-long",

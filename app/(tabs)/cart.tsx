@@ -1,5 +1,6 @@
 
 import { useApp } from '@/contexts/AppContext';
+import { useEffect } from 'react';
 import type { CartItem } from '@/contexts/AppContext';
 import React, { useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -21,6 +22,17 @@ import { LinearGradient } from 'expo-linear-gradient';
 export default function CartScreen() {
   const { cart, updateCartQuantity, removeFromCart, currentColors, menuItems, addToCart  } = useApp();
   const router = useRouter();
+  useEffect(() => {
+  console.log('=== Swallow Debug ===');
+  console.log('Cart items:', cart.map(i => ({ name: i.name, category: i.category })));
+  console.log('Menu items with swallow category:', menuItems.filter(i => 
+    i.category?.toLowerCase().includes('swallow')
+  ).map(i => ({ name: i.name, category: i.category })));
+  console.log('Menu items with soup category:', menuItems.filter(i => 
+    i.category?.toLowerCase().includes('soup')
+  ).map(i => ({ name: i.name, category: i.category })));
+  console.log('Total menu items loaded:', menuItems.length);
+}, [cart, menuItems]);
   const [dialogVisible, setDialogVisible] = useState(false);
   const [dialogType, setDialogType] = useState<'remove' | 'empty'>('remove');
   const [itemToRemove, setItemToRemove] = useState<string | null>(null);

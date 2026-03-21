@@ -32,11 +32,11 @@ export const DELIVERY_PROVIDERS = {
   uber_direct: {
     name: 'Uber Direct',
     description: 'Fast and reliable delivery with Uber',
-    icon: 'car',
+    icon: 'scooter',
   },
   doordash: {
     name: 'DoorDash',
     description: 'Trusted delivery with DoorDash',
-    icon: 'local-shipping',
+    icon: 'truck.box',
   },
 };

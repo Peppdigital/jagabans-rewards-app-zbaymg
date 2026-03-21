@@ -383,7 +383,7 @@ export default function AdminDashboard() {
     id: "notification-emails",
     title: "Notification Emails",
     description: "Manage admin email recipients",
-    icon: "envelope.badge" as const, // SF Symbol for iOS
+    icon: "envelope.fill" as const, // SF Symbol for iOS
     route: "/admin/notification-emails",
     color: "#6366F1",
     superAdminOnly: true,
@@ -621,7 +621,7 @@ export default function AdminDashboard() {
             </Pressable>
             <Pressable style={styles.logoutButton} onPress={handleLogout}>
                   <IconSymbol 
-                    name="rectangle.and.arrow.up.right.and.arrow.down.left" // SF Symbol for iOS
+                    name="rectangle.portrait.and.arrow.forward" // SF Symbol for iOS
                     size={24} 
                     color={colors.primary} 
                   />
