@@ -161,7 +161,9 @@ function CheckoutContent() {
     currentColors, 
     setTabBarVisible,
     clearCart,
-    loadUserProfile
+    loadUserProfile,
+    menuItems,
+    addToCart
   } = useApp();
 
   const { initPaymentSheet, presentPaymentSheet } = useStripe();
@@ -171,7 +173,7 @@ function CheckoutContent() {
   // ============================================================================
 
   const [orderType, setOrderType] = useState<OrderType>('pickup');
-  const [deliveryAddress, setDeliveryAddress] = useState('');
+  const [deliveryAddress, setDeliveryAddress] = useState(userProfile?.address || '');
   const [pickupNotes, setPickupNotes] = useState('');
   const [usePoints, setUsePoints] = useState(false);
   const [processing, setProcessing] = useState(false);
@@ -196,6 +198,12 @@ function CheckoutContent() {
 
   // Payment Sheet state
   const [paymentSheetReady, setPaymentSheetReady] = useState(false);
+
+  useEffect(() => {
+    if (userProfile?.address && !deliveryAddress) {
+      setDeliveryAddress(userProfile.address);
+    }
+  }, [userProfile?.address]);
 
   // ============================================================================
   // COMPUTED VALUES (CORRECTED POINTS SYSTEM)

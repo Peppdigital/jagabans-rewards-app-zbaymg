@@ -178,6 +178,7 @@ export const userService = {
         .update({
           name: updates.name,
           phone: updates.phone,
+          address: updates.address,
           profile_image: updates.profileImage,
           updated_at: new Date().toISOString(),
         })

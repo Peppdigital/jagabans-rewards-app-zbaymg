@@ -19,11 +19,22 @@ import Dialog from '@/components/Dialog';
 import { LinearGradient } from 'expo-linear-gradient';
 
 export default function CartScreen() {
-  const { cart, updateCartQuantity, removeFromCart, currentColors } = useApp();
+  const { cart, updateCartQuantity, removeFromCart, currentColors, menuItems, addToCart  } = useApp();
   const router = useRouter();
   const [dialogVisible, setDialogVisible] = useState(false);
   const [dialogType, setDialogType] = useState<'remove' | 'empty'>('remove');
   const [itemToRemove, setItemToRemove] = useState<string | null>(null);
+  const soupCategories = ['soups x dips', 'online soups x dips'];
+  const hasSoupItem = cart.some(item =>
+    soupCategories.includes(item.category?.toLowerCase?.() ?? '')
+  );
+  const hasSwallow = cart.some(item =>
+    item.category?.toLowerCase?.() === 'swallows'
+  );
+  const swallowItems = (hasSoupItem && !hasSwallow)
+    ? menuItems.filter(item => item.category?.toLowerCase?.() === 'swallows' && item.available !== false)
+    : [];
+  const showSwallowPrompt = swallowItems.length > 0;
 
   const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const tax = subtotal * 0.0975;
@@ -158,6 +169,116 @@ export default function CartScreen() {
                     </Pressable>
                   </LinearGradient>
                 ))}
+                {showSwallowPrompt && (
+                  <LinearGradient
+                    colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={{
+                      borderWidth: 2,
+                      borderColor: currentColors.secondary,
+                      padding: 16,
+                      marginBottom: 16,
+                    }}
+                  >
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                      <IconSymbol name="info.circle.fill" size={18} color={currentColors.secondary} />
+                      <Text style={{ 
+                        fontFamily: 'PlayfairDisplay_700Bold', 
+                        fontSize: 16, 
+                        color: currentColors.secondary 
+                      }}>
+                        Add a swallow?
+                      </Text>
+                    </View>
+                    <Text style={{ 
+                      fontFamily: 'Cormorant_400Regular', 
+                      fontSize: 14, 
+                      color: currentColors.textSecondary,
+                      marginBottom: 12,
+                      lineHeight: 20,
+                    }}>
+                      Your soup pairs great with a swallow. Add one to your order:
+                    </Text>
+                    {swallowItems.map(item => {
+                      const alreadyInCart = cart.some(c => c.id === item.id);
+                      return (
+                        <View
+                          key={item.id}
+                          style={{
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            paddingVertical: 10,
+                            borderTopWidth: 1,
+                            borderTopColor: currentColors.border,
+                          }}
+                        >
+                          <View style={{ flex: 1 }}>
+                            <Text style={{ 
+                              fontFamily: 'PlayfairDisplay_700Bold', 
+                              fontSize: 15, 
+                              color: currentColors.text 
+                            }}>
+                              {item.name}
+                            </Text>
+                            <Text style={{ 
+                              fontFamily: 'Cormorant_600SemiBold', 
+                              fontSize: 14, 
+                              color: currentColors.secondary,
+                              marginTop: 2,
+                            }}>
+                              ${item.price.toFixed(2)}
+                            </Text>
+                          </View>
+                          {alreadyInCart ? (
+                            <View style={{
+                              paddingHorizontal: 14,
+                              paddingVertical: 8,
+                              borderWidth: 1,
+                              borderColor: currentColors.secondary,
+                            }}>
+                              <Text style={{ 
+                                fontFamily: 'Cormorant_600SemiBold', 
+                                fontSize: 13, 
+                                color: currentColors.secondary 
+                              }}>
+                                Added ✓
+                              </Text>
+                            </View>
+                          ) : (
+                            <LinearGradient
+                              colors={[currentColors.secondary, currentColors.highlight]}
+                              start={{ x: 0, y: 0 }}
+                              end={{ x: 1, y: 0 }}
+                              style={{ borderRadius: 0 }}
+                            >
+                              <Pressable
+                                style={{ paddingHorizontal: 14, paddingVertical: 8 }}
+                                onPress={() => {
+                                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                                  addToCart({
+                                    ...item,
+                                    id: String(item.id),
+                                    quantity: 1,
+                                  });
+                                }}
+                              >
+                                <Text style={{ 
+                                  fontFamily: 'Cormorant_700Bold', 
+                                  fontSize: 14, 
+                                  color: currentColors.background 
+                                }}>
+                                  + Add
+                                </Text>
+                              </Pressable>
+                            </LinearGradient>
+                          )}
+                        </View>
+                      );
+                    })}
+                  </LinearGradient>
+                )}
               </ScrollView>
 
               {/* Summary with Gradient */}

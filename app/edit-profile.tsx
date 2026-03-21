@@ -31,6 +31,7 @@ export default function EditProfileScreen() {
   const [name, setName] = useState(userProfile?.name || '');
   const [email, setEmail] = useState(userProfile?.email || '');
   const [phone, setPhone] = useState(userProfile?.phone || '');
+  const [address, setAddress] = useState(userProfile?.address || '');
   const [profileImagePath, setProfileImagePath] = useState<string | null>(userProfile?.profileImage || null);
   const [profileImageUrl, setProfileImageUrl] = useState<string | null>(null);
   
@@ -103,6 +104,7 @@ export default function EditProfileScreen() {
         name,
         email,
         phone,
+        address,
         profileImage: imagePathToSave || undefined,
       });
 
@@ -413,7 +415,29 @@ export default function EditProfileScreen() {
                 editable={!saving}
               />
             </View>
-
+            
+            <View style={styles.inputGroup}>
+              <Text style={[styles.inputLabel, { color: currentColors.text }]}>Address</Text>
+              <TextInput
+                style={[
+                  styles.input,
+                  {
+                    backgroundColor: currentColors.card,
+                    color: currentColors.text,
+                    borderColor: currentColors.border,
+                    minHeight: 80,
+                    textAlignVertical: 'top',
+                  }
+                ]}
+                value={address}
+                onChangeText={setAddress}
+                placeholder="Enter your delivery address"
+                placeholderTextColor={currentColors.textSecondary}
+                multiline
+                numberOfLines={3}
+                editable={!saving}
+              />
+            </View>
             {/* Info note about saving */}
             <LinearGradient
               colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
