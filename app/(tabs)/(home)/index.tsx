@@ -29,11 +29,15 @@ const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
 const menuCategories = [
   "All",
-  "Online Appetizers",
-  "Online Jollof Combos",
-  "Online Beverages",
-  "Online Sides",
-  "Online Soups x Dips",
+  "Appetizers",
+  "Specials",
+  "Jollof Rice Plates",
+  "White Rice Plates",
+  "Peppa Pasta Plates",
+  "Soups x Dips",
+  "Swallows",
+  "Extras",
+  "Drinks",
 ];
 
 // Responsive font size calculation

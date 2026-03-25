@@ -1,4 +1,3 @@
-
 import { useApp } from '@/contexts/AppContext';
 import { useEffect } from 'react';
 import type { CartItem } from '@/contexts/AppContext';
@@ -18,42 +17,31 @@ import {
 import { IconSymbol } from '@/components/IconSymbol';
 import Dialog from '@/components/Dialog';
 import { LinearGradient } from 'expo-linear-gradient';
+import swallowImage from '@/assets/images/swallow.jpeg';
 
 export default function CartScreen() {
-  const { cart, updateCartQuantity, removeFromCart, currentColors, menuItems, addToCart  } = useApp();
+  const { cart, updateCartQuantity, removeFromCart, currentColors, menuItems, addToCart } = useApp();
   const router = useRouter();
-  useEffect(() => {
-  console.log('=== Swallow Debug ===');
-  console.log('Cart items:', cart.map(i => ({ name: i.name, category: i.category })));
-  console.log('Menu items with swallow category:', menuItems.filter(i => 
-    i.category?.toLowerCase().includes('swallow')
-  ).map(i => ({ name: i.name, category: i.category })));
-  console.log('Menu items with soup category:', menuItems.filter(i => 
-    i.category?.toLowerCase().includes('soup')
-  ).map(i => ({ name: i.name, category: i.category })));
-  console.log('Total menu items loaded:', menuItems.length);
-}, [cart, menuItems]);
+
   const [dialogVisible, setDialogVisible] = useState(false);
   const [dialogType, setDialogType] = useState<'remove' | 'empty'>('remove');
   const [itemToRemove, setItemToRemove] = useState<string | null>(null);
-  const soupCategories = ['soups x dips', 'online soups x dips'];
-  const hasSoupItem = cart.some(item =>
-    soupCategories.includes(item.category?.toLowerCase?.() ?? '')
-  );
-  const hasSwallow = cart.some(item =>
-    item.category?.toLowerCase?.() === 'swallows'
-  );
-  const swallowItems = (hasSoupItem && !hasSwallow)
-    ? menuItems.filter(item => item.category?.toLowerCase?.() === 'swallows' && item.available !== false)
-    : [];
-  const showSwallowPrompt = swallowItems.length > 0;
+
+  const soupCount = cart.filter(item =>
+    item.category?.toLowerCase().includes('soup')
+  ).length;
+
+  const swallowCount = cart.filter(item =>
+    item.category?.toLowerCase().includes('swallow')
+  ).length;
+
+  const showSwallowBadge = soupCount > 0 && swallowCount < soupCount;
 
   const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const tax = subtotal * 0.0975;
   const total = subtotal + tax;
 
   const handleQuantityChange = (itemId: string, change: number) => {
-    console.log('Quantity change:', itemId, change);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     const item = cart.find((i) => i.id === itemId);
     if (item) {
@@ -62,7 +50,6 @@ export default function CartScreen() {
   };
 
   const handleRemoveItem = (itemId: string) => {
-    console.log('Removing item:', itemId);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setItemToRemove(itemId);
     setDialogVisible(true);
@@ -77,7 +64,6 @@ export default function CartScreen() {
   };
 
   const handleCheckout = () => {
-    console.log('Proceeding to checkout');
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     if (cart.length === 0) {
       setDialogType('empty');
@@ -96,7 +82,6 @@ export default function CartScreen() {
     >
       <SafeAreaView style={styles.safeArea} edges={['top']}>
         <View style={styles.container}>
-          {/* Header with Gradient */}
           <LinearGradient
             colors={[currentColors.headerGradientStart || currentColors.card, currentColors.headerGradientEnd || currentColors.card]}
             start={{ x: 0, y: 0 }}
@@ -142,158 +127,101 @@ export default function CartScreen() {
                 showsVerticalScrollIndicator={false}
               >
                 {cart.map((item) => (
-                  <LinearGradient
-                    key={item.id}
-                    colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 1 }}
-                    style={[styles.cartItem, { borderColor: currentColors.border }]}
-                  >
-                    <View style={[styles.imageContainer, { borderColor: currentColors.border }]}>
-                      <Image source={{ uri: item.image }} style={styles.itemImage} />
-                    </View>
-                    <View style={styles.itemDetails}>
-                      <Text style={[styles.itemName, { color: currentColors.text }]}>{item.name}</Text>
-                      <Text style={[styles.itemPrice, { color: currentColors.secondary }]}>
-                        ${item.price.toFixed(2)}
-                      </Text>
-                      <View style={styles.quantityContainer}>
+                  <React.Fragment key={item.id}>
+                    <View style={{ position: 'relative', marginBottom: 24 }}>
+                      <LinearGradient
+                        colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 1 }}
+                        style={[styles.cartItem, { borderColor: currentColors.border, marginBottom: 0 }]}
+                      >
+                        <View style={[styles.imageContainer, { borderColor: currentColors.border }]}>
+                          <Image source={{ uri: item.image }} style={styles.itemImage} />
+                        </View>
+                        <View style={styles.itemDetails}>
+                          <Text style={[styles.itemName, { color: currentColors.text }]}>{item.name}</Text>
+                          <Text style={[styles.itemPrice, { color: currentColors.secondary }]}>
+                            ${item.price.toFixed(2)}
+                          </Text>
+                          <View style={styles.quantityContainer}>
+                            <Pressable
+                              style={[styles.quantityButton, { backgroundColor: currentColors.background, borderColor: currentColors.border }]}
+                              onPress={() => handleQuantityChange(item.id, -1)}
+                            >
+                              <IconSymbol name="minus" size={16} color={currentColors.secondary} />
+                            </Pressable>
+                            <Text style={[styles.quantity, { color: currentColors.text }]}>{item.quantity}</Text>
+                            <Pressable
+                              style={[styles.quantityButton, { backgroundColor: currentColors.background, borderColor: currentColors.border }]}
+                              onPress={() => handleQuantityChange(item.id, 1)}
+                            >
+                              <IconSymbol name="plus" size={16} color={currentColors.secondary} />
+                            </Pressable>
+                          </View>
+                        </View>
                         <Pressable
-                          style={[styles.quantityButton, { backgroundColor: currentColors.background, borderColor: currentColors.border }]}
-                          onPress={() => handleQuantityChange(item.id, -1)}
+                          style={styles.removeButton}
+                          onPress={() => handleRemoveItem(item.id)}
                         >
-                          <IconSymbol name="minus" size={16} color={currentColors.secondary} />
+                          <IconSymbol name="trash" size={20} color={currentColors.textSecondary} />
                         </Pressable>
-                        <Text style={[styles.quantity, { color: currentColors.text }]}>{item.quantity}</Text>
+                      </LinearGradient>
+
+                      {item.category?.toLowerCase().includes('soup') && showSwallowBadge && (
                         <Pressable
-                          style={[styles.quantityButton, { backgroundColor: currentColors.background, borderColor: currentColors.border }]}
-                          onPress={() => handleQuantityChange(item.id, 1)}
-                        >
-                          <IconSymbol name="plus" size={16} color={currentColors.secondary} />
-                        </Pressable>
-                      </View>
-                    </View>
-                    <Pressable
-                      style={styles.removeButton}
-                      onPress={() => handleRemoveItem(item.id)}
-                    >
-                      <IconSymbol name="trash" size={20} color={currentColors.textSecondary} />
-                    </Pressable>
-                  </LinearGradient>
-                ))}
-                {showSwallowPrompt && (
-                  <LinearGradient
-                    colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 1 }}
-                    style={{
-                      borderWidth: 2,
-                      borderColor: currentColors.secondary,
-                      padding: 16,
-                      marginBottom: 16,
-                    }}
-                  >
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                      <IconSymbol name="info.circle.fill" size={18} color={currentColors.secondary} />
-                      <Text style={{ 
-                        fontFamily: 'PlayfairDisplay_700Bold', 
-                        fontSize: 16, 
-                        color: currentColors.secondary 
-                      }}>
-                        Add a swallow?
-                      </Text>
-                    </View>
-                    <Text style={{ 
-                      fontFamily: 'Cormorant_400Regular', 
-                      fontSize: 14, 
-                      color: currentColors.textSecondary,
-                      marginBottom: 12,
-                      lineHeight: 20,
-                    }}>
-                      Your soup pairs great with a swallow. Add one to your order:
-                    </Text>
-                    {swallowItems.map(item => {
-                      const alreadyInCart = cart.some(c => c.id === item.id);
-                      return (
-                        <View
-                          key={item.id}
+                          onPress={() => {
+                            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                            router.push({ pathname: '/', params: { category: 'Swallows' } });
+                          }}
                           style={{
-                            flexDirection: 'row',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            paddingVertical: 10,
-                            borderTopWidth: 1,
-                            borderTopColor: currentColors.border,
+                            position: 'absolute',
+                            bottom: -18,
+                            right: 12,
+                            zIndex: 10,
                           }}
                         >
-                          <View style={{ flex: 1 }}>
-                            <Text style={{ 
-                              fontFamily: 'PlayfairDisplay_700Bold', 
-                              fontSize: 15, 
-                              color: currentColors.text 
-                            }}>
-                              {item.name}
-                            </Text>
-                            <Text style={{ 
-                              fontFamily: 'Cormorant_600SemiBold', 
-                              fontSize: 14, 
-                              color: currentColors.secondary,
-                              marginTop: 2,
-                            }}>
-                              ${item.price.toFixed(2)}
-                            </Text>
-                          </View>
-                          {alreadyInCart ? (
-                            <View style={{
-                              paddingHorizontal: 14,
-                              paddingVertical: 8,
+                          <View
+                            style={{
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                              gap: 8,
+                              paddingHorizontal: 10,
+                              paddingVertical: 6,
+                              borderRadius: 20,
                               borderWidth: 1,
-                              borderColor: currentColors.secondary,
+                              borderColor: 'rgba(255,255,255,0.3)',
+                              backgroundColor: 'rgba(0,0,0,0.35)',
+                              overflow: 'hidden',
+                              elevation: 10,
+                            }}
+                          >
+                            <Image
+                              source={swallowImage}
+                              style={{
+                                width: 28,
+                                height: 28,
+                                borderRadius: 14,
+                                borderWidth: 1,
+                                borderColor: 'rgba(255,255,255,0.4)',
+                              }}
+                            />
+                            <Text style={{
+                              fontFamily: 'Cormorant_600SemiBold',
+                              fontSize: 13,
+                              color: '#FFFFFF',
+                              letterSpacing: 0.3,
                             }}>
-                              <Text style={{ 
-                                fontFamily: 'Cormorant_600SemiBold', 
-                                fontSize: 13, 
-                                color: currentColors.secondary 
-                              }}>
-                                Added ✓
-                              </Text>
-                            </View>
-                          ) : (
-                            <LinearGradient
-                              colors={[currentColors.secondary, currentColors.highlight]}
-                              start={{ x: 0, y: 0 }}
-                              end={{ x: 1, y: 0 }}
-                              style={{ borderRadius: 0 }}
-                            >
-                              <Pressable
-                                style={{ paddingHorizontal: 14, paddingVertical: 8 }}
-                                onPress={() => {
-                                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                                  addToCart({
-                                    ...item,
-                                    id: String(item.id),
-                                    quantity: 1,
-                                  });
-                                }}
-                              >
-                                <Text style={{ 
-                                  fontFamily: 'Cormorant_700Bold', 
-                                  fontSize: 14, 
-                                  color: currentColors.background 
-                                }}>
-                                  + Add
-                                </Text>
-                              </Pressable>
-                            </LinearGradient>
-                          )}
-                        </View>
-                      );
-                    })}
-                  </LinearGradient>
-                )}
+                              Add a Swallow
+                            </Text>
+                            <IconSymbol name="arrow.right" size={11} color="rgba(255,255,255,0.8)" />
+                          </View>
+                        </Pressable>
+                      )}
+                    </View>
+                  </React.Fragment>
+                ))}
               </ScrollView>
 
-              {/* Summary with Gradient */}
               <LinearGradient
                 colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
                 start={{ x: 0, y: 0 }}
@@ -343,23 +271,11 @@ export default function CartScreen() {
           buttons={
             dialogType === 'remove'
               ? [
-                  {
-                    text: 'Cancel',
-                    onPress: () => setItemToRemove(null),
-                    style: 'cancel',
-                  },
-                  {
-                    text: 'Remove',
-                    onPress: handleConfirmRemove,
-                    style: 'destructive',
-                  },
+                  { text: 'Cancel', onPress: () => setItemToRemove(null), style: 'cancel' },
+                  { text: 'Remove', onPress: handleConfirmRemove, style: 'destructive' },
                 ]
               : [
-                  {
-                    text: 'OK',
-                    onPress: () => {},
-                    style: 'default',
-                  },
+                  { text: 'OK', onPress: () => {}, style: 'default' },
                 ]
           }
           onHide={() => {
@@ -374,15 +290,9 @@ export default function CartScreen() {
 }
 
 const styles = StyleSheet.create({
-  gradientContainer: {
-    flex: 1,
-  },
-  safeArea: {
-    flex: 1,
-  },
-  container: {
-    flex: 1,
-  },
+  gradientContainer: { flex: 1 },
+  safeArea: { flex: 1 },
+  container: { flex: 1 },
   header: {
     paddingHorizontal: 20,
     paddingVertical: 24,
@@ -399,158 +309,40 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 2 },
     textShadowRadius: 4,
   },
-  itemCount: {
-    fontSize: 14,
-    fontFamily: 'Cormorant_400Regular',
-  },
-  emptyContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 40,
-  },
-  emptyText: {
-    fontSize: 24,
-    fontFamily: 'PlayfairDisplay_700Bold',
-    marginTop: 20,
-    marginBottom: 8,
-  },
-  emptySubtext: {
-    fontSize: 14,
-    fontFamily: 'Cormorant_400Regular',
-    textAlign: 'center',
-    marginBottom: 24,
-  },
-  browseButton: {
-    borderRadius: 0,
-    boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.4)',
-    elevation: 8,
-  },
-  browseButtonInner: {
-    paddingHorizontal: 32,
-    paddingVertical: 14,
-  },
-  browseButtonText: {
-    fontSize: 16,
-    fontFamily: 'Cormorant_600SemiBold',
-  },
-  cartList: {
-    flex: 1,
-  },
-  cartListContent: {
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 20,
-  },
+  itemCount: { fontSize: 14, fontFamily: 'Cormorant_400Regular' },
+  emptyContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 40 },
+  emptyText: { fontSize: 24, fontFamily: 'PlayfairDisplay_700Bold', marginTop: 20, marginBottom: 8 },
+  emptySubtext: { fontSize: 14, fontFamily: 'Cormorant_400Regular', textAlign: 'center', marginBottom: 24 },
+  browseButton: { borderRadius: 0, boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.4)', elevation: 8 },
+  browseButtonInner: { paddingHorizontal: 32, paddingVertical: 14 },
+  browseButtonText: { fontSize: 16, fontFamily: 'Cormorant_600SemiBold' },
+  cartList: { flex: 1 },
+  cartListContent: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 20 },
   cartItem: {
     flexDirection: 'row',
     borderRadius: 0,
     padding: 12,
-    marginBottom: 16,
     borderWidth: 2,
     boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.3)',
     elevation: 8,
   },
-  imageContainer: {
-    borderRadius: 0,
-    overflow: 'hidden',
-    borderWidth: 2,
-    boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.2)',
-    elevation: 4,
-  },
-  itemImage: {
-    width: 80,
-    height: 80,
-    borderRadius: 0,
-  },
-  itemDetails: {
-    flex: 1,
-    marginLeft: 12,
-    justifyContent: 'space-between',
-  },
-  itemName: {
-    fontSize: 16,
-    fontFamily: 'PlayfairDisplay_700Bold',
-    marginBottom: 4,
-  },
-  itemPrice: {
-    fontSize: 16,
-    fontFamily: 'Cormorant_700Bold',
-    marginBottom: 8,
-  },
-  quantityContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  quantityButton: {
-    width: 28,
-    height: 28,
-    borderRadius: 0,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 2,
-    boxShadow: '0px 4px 12px rgba(212, 175, 55, 0.25)',
-    elevation: 4,
-  },
-  quantity: {
-    fontSize: 16,
-    fontFamily: 'Cormorant_600SemiBold',
-    minWidth: 24,
-    textAlign: 'center',
-  },
-  removeButton: {
-    padding: 8,
-  },
-  summary: {
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 120,
-    borderTopWidth: 2,
-    boxShadow: '0px -6px 20px rgba(74, 215, 194, 0.3)',
-    elevation: 10,
-  },
-  summaryRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 12,
-  },
-  summaryLabel: {
-    fontSize: 14,
-    fontFamily: 'Cormorant_400Regular',
-  },
-  summaryValue: {
-    fontSize: 14,
-    fontFamily: 'Cormorant_600SemiBold',
-  },
-  totalRow: {
-    marginTop: 8,
-    paddingTop: 12,
-    borderTopWidth: 2,
-  },
-  totalLabel: {
-    fontSize: 18,
-    fontFamily: 'PlayfairDisplay_700Bold',
-  },
-  totalValue: {
-    fontSize: 20,
-    fontFamily: 'Cormorant_700Bold',
-  },
-  checkoutButton: {
-    borderRadius: 0,
-    marginTop: 20,
-    boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.5)',
-    elevation: 10,
-  },
-  checkoutButtonInner: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingVertical: 16,
-    gap: 8,
-  },
-  checkoutButtonText: {
-    fontSize: 16,
-    fontFamily: 'Cormorant_700Bold',
-  },
+  imageContainer: { borderRadius: 0, overflow: 'hidden', borderWidth: 2, boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.2)', elevation: 4 },
+  itemImage: { width: 80, height: 80, borderRadius: 0 },
+  itemDetails: { flex: 1, marginLeft: 12, justifyContent: 'space-between' },
+  itemName: { fontSize: 16, fontFamily: 'PlayfairDisplay_700Bold', marginBottom: 4 },
+  itemPrice: { fontSize: 16, fontFamily: 'Cormorant_700Bold', marginBottom: 8 },
+  quantityContainer: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  quantityButton: { width: 28, height: 28, borderRadius: 0, justifyContent: 'center', alignItems: 'center', borderWidth: 2, boxShadow: '0px 4px 12px rgba(212, 175, 55, 0.25)', elevation: 4 },
+  quantity: { fontSize: 16, fontFamily: 'Cormorant_600SemiBold', minWidth: 24, textAlign: 'center' },
+  removeButton: { padding: 8 },
+  summary: { paddingHorizontal: 20, paddingTop: 20, paddingBottom: 120, borderTopWidth: 2, boxShadow: '0px -6px 20px rgba(74, 215, 194, 0.3)', elevation: 10 },
+  summaryRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 },
+  summaryLabel: { fontSize: 14, fontFamily: 'Cormorant_400Regular' },
+  summaryValue: { fontSize: 14, fontFamily: 'Cormorant_600SemiBold' },
+  totalRow: { marginTop: 8, paddingTop: 12, borderTopWidth: 2 },
+  totalLabel: { fontSize: 18, fontFamily: 'PlayfairDisplay_700Bold' },
+  totalValue: { fontSize: 20, fontFamily: 'Cormorant_700Bold' },
+  checkoutButton: { borderRadius: 0, marginTop: 20, boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.5)', elevation: 10 },
+  checkoutButtonInner: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', paddingVertical: 16, gap: 8 },
+  checkoutButtonText: { fontSize: 16, fontFamily: 'Cormorant_700Bold' },
 });

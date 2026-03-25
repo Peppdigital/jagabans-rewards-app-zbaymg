@@ -1,5 +1,4 @@
-
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -9,6 +8,8 @@ import {
   Alert,
   TextInput,
   ActivityIndicator,
+  FlatList,
+  Keyboard,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -18,7 +19,6 @@ import * as Haptics from 'expo-haptics';
 import Toast from '@/components/Toast';
 import { SUPABASE_URL, supabase } from '@/app/integrations/supabase/client';
 import { StripeProvider, useStripe } from '@stripe/stripe-react-native';
-import Dialog from '@/components/Dialog';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Linking from 'expo-linking';
 
@@ -38,51 +38,53 @@ interface AddressValidationResult {
     postalCode?: string;
     country?: string;
   };
+  /** JSON string ready to pass as dropoff_address to Uber Direct API */
+  uberAddress?: string;
   confidence?: 'high' | 'medium' | 'low';
   suggestions?: string[];
   error?: string;
 }
 
+interface DeliveryQuote {
+  quoteId: string;
+  fee: number;
+  feeCents: number;
+  currency: string;
+  duration: number;
+  pickupDuration: number;
+  dropoffEta: string;
+  expires: string;
+}
+
+// ── Google Places types ────────────────────────────────────────────────────
+
+interface PlacesPrediction {
+  place_id: string;
+  description: string;
+  structured_formatting: {
+    main_text: string;
+    secondary_text: string;
+  };
+}
+
 type OrderType = 'delivery' | 'pickup';
 
 interface Order {
-  id: string; // uuid
+  id: string;
   user_id: string | null;
-
-  total: number; // numeric(10,2) → number in TS
+  total: number;
   points_earned: number;
-
-  status:
-    | 'pending'
-    | 'preparing'
-    | 'ready'
-    | 'completed'
-    | 'cancelled';
-    order_type:
-    | 'pickup'
-    | 'delivery';
-  payment_status:
-    | 'pending'
-    | 'processing'
-    | 'succeeded'
-    | 'failed'
-    | 'canceled'
-    | null;
-
+  status: 'pending' | 'preparing' | 'ready' | 'completed' | 'cancelled';
+  order_type: 'pickup' | 'delivery';
+  payment_status: 'pending' | 'processing' | 'succeeded' | 'failed' | 'canceled' | null;
   payment_id: string | null;
-
   order_number: number;
-
   full_name: string | null;
-
   delivery_address: string | null;
   pickup_notes: string | null;
-
   delivery_provider: string | null;
   delivery_triggered_at: string | null;
   cancellation_deadline: string | null;
-
-  // Uber
   uber_delivery_id: string | null;
   uber_delivery_status: string | null;
   uber_tracking_url: string | null;
@@ -91,8 +93,6 @@ interface Order {
   uber_courier_location: Record<string, unknown> | null;
   uber_delivery_eta: string | null;
   uber_proof_of_delivery: Record<string, unknown> | null;
-
-  // DoorDash
   doordash_delivery_id: string | null;
   doordash_delivery_status: string | null;
   doordash_tracking_url: string | null;
@@ -101,103 +101,81 @@ interface Order {
   doordash_dasher_location: Record<string, unknown> | null;
   doordash_delivery_eta: string | null;
   doordash_proof_of_delivery: Record<string, unknown> | null;
-
   read: boolean | null;
   read_at: string | null;
-
   created_at: string;
   updated_at: string;
 }
 
-interface StripePayment {
-  id: string;
-  user_id: string;
-  order_id: string;
-  payment_id: string;
-  amount: number;
-  currency: string;
-  status: string;
-  payment_method?: string;
-  receipt_url?: string;
-  error_message?: string;
-  metadata?: Record<string, any>;
-  created_at?: string;
-  updated_at?: string;
-}
+// ============================================================================
+// CONSTANTS
+// ============================================================================
 
-interface StoredCard {
-  id: string;
-  stripePaymentMethodId: string;
-  cardBrand: string;
-  last4: string;
-  expMonth: number;
-  expYear: number;
-  isDefault: boolean;
-}
+const STRIPE_PUBLISHABLE_KEY =
+  process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY ||
+  'pk_live_51SaVNBEpxgw216dfngaO9r3erOFV7XFC4zvvwMd97HuPpWpvCy26sCwWITZHhmtAv6iZLT35RGITrIxBoTF1v9AI007NGoktyP';
+
+// Replace with your actual Google Places API key
+const GOOGLE_PLACES_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_PLACES_API_KEY || 'AIzaSyAD8zYhfNdoR6DEv5E1Dbbr0dyI7fMAJ3Q';
+
+const POINTS_TO_DOLLAR_RATE = 0.01;
+const DISCOUNT_PERCENTAGE = 0.15;
+const POINTS_REWARD_PERCENTAGE = 0.05;
+const QUOTE_REFRESH_BUFFER_MS = 60_000;
+const FALLBACK_DELIVERY_FEE = 12.99; // applied when Uber quote is unavailable
 
 // ============================================================================
-// STRIPE PUBLISHABLE KEY
-// ============================================================================
-const STRIPE_PUBLISHABLE_KEY = process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY || 'pk_live_51SaVNBEpxgw216dfngaO9r3erOFV7XFC4zvvwMd97HuPpWpvCy26sCwWITZHhmtAv6iZLT35RGITrIxBoTF1v9AI007NGoktyP';
-
-// ============================================================================
-// POINTS SYSTEM CONSTANTS
-// ============================================================================
-// CORRECT LOGIC: 100 points = $1
-// This means: 1 point = $0.01
-const POINTS_TO_DOLLAR_RATE = 0.01; // 1 point = $0.01, so 100 points = $1
-const DISCOUNT_PERCENTAGE = 0.15; // 15% discount
-const POINTS_REWARD_PERCENTAGE = 0.05; // 5% of order as points
-
-// ============================================================================
-// CHECKOUT CONTENT COMPONENT
+// CHECKOUT CONTENT
 // ============================================================================
 
 function CheckoutContent() {
   const router = useRouter();
-  const { 
-    cart, 
-    userProfile, 
-    currentColors, 
+  const {
+    cart,
+    userProfile,
+    currentColors,
     setTabBarVisible,
     clearCart,
     loadUserProfile,
-    menuItems,
-    addToCart
   } = useApp();
 
   const { initPaymentSheet, presentPaymentSheet } = useStripe();
 
-  // ============================================================================
-  // STATE
-  // ============================================================================
+  // ── State ─────────────────────────────────────────────────────────────────
 
   const [orderType, setOrderType] = useState<OrderType>('pickup');
   const [deliveryAddress, setDeliveryAddress] = useState(userProfile?.address || '');
   const [pickupNotes, setPickupNotes] = useState('');
   const [usePoints, setUsePoints] = useState(false);
   const [processing, setProcessing] = useState(false);
-  
-  // Address validation state
+
+  // Address validation
   const [addressValidation, setAddressValidation] = useState<AddressValidationResult | null>(null);
   const [isValidatingAddress, setIsValidatingAddress] = useState(false);
   const [addressTouched, setAddressTouched] = useState(false);
-  const [validatedAddress, setValidatedAddress] = useState<string>('');
-  
-  // Toast state
+  const [validatedAddress, setValidatedAddress] = useState('');
+  // Uber Direct-formatted JSON string (ready for dropoff_address field)
+  const [validatedUberAddress, setValidatedUberAddress] = useState('');
+
+  // ── Google Places autocomplete state ──────────────────────────────────────
+  const [placeSuggestions, setPlaceSuggestions] = useState<PlacesPrediction[]>([]);
+  const [isFetchingSuggestions, setIsFetchingSuggestions] = useState(false);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [suggestionSelected, setSuggestionSelected] = useState(false);
+  const placesDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const addressInputRef = useRef<TextInput>(null);
+
+  // Delivery quote
+  const [deliveryQuote, setDeliveryQuote] = useState<DeliveryQuote | null>(null);
+  const [isFetchingQuote, setIsFetchingQuote] = useState(false);
+  const [quoteError, setQuoteError] = useState<string | null>(null);
+
+  // Toast
   const [toastVisible, setToastVisible] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
   const [toastType, setToastType] = useState<'success' | 'error' | 'info'>('success');
 
-  //Dialog state
-  const [dialogVisible, setDialogVisible] = useState(false);
-  const [dialogType, setDialogType] = useState<'remove' | 'empty'>('remove');
-
-  // Order state for realtime updates
-  const [currentOrderId, setCurrentOrderId] = useState<string | null>(null);
-
-  // Payment Sheet state
-  const [paymentSheetReady, setPaymentSheetReady] = useState(false);
+  // ── Sync saved address from profile ──────────────────────────────────────
 
   useEffect(() => {
     if (userProfile?.address && !deliveryAddress) {
@@ -205,39 +183,30 @@ function CheckoutContent() {
     }
   }, [userProfile?.address]);
 
-  // ============================================================================
-  // COMPUTED VALUES (CORRECTED POINTS SYSTEM)
-  // ============================================================================
+  // ── Computed values ───────────────────────────────────────────────────────
 
   const availablePoints = userProfile?.points || 0;
   const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  
-  // Apply 15% discount before tax
   const discount = subtotal * DISCOUNT_PERCENTAGE;
   const subtotalAfterDiscount = subtotal - discount;
-  
-  // Calculate tax on discounted amount
   const tax = subtotalAfterDiscount * 0.0975;
-  
-  // Points discount (if using points)
-  // CORRECTED: 100 points = $1, so 1 point = $0.01
-  // Convert points to dollars: availablePoints * 0.01
-  // Cap at 20% of subtotal after discount
+
   const pointsValueInDollars = availablePoints * POINTS_TO_DOLLAR_RATE;
   const maxPointsDiscount = subtotalAfterDiscount * 0.2;
   const pointsDiscount = usePoints ? Math.min(pointsValueInDollars, maxPointsDiscount) : 0;
-  
-  // Total after all discounts and tax
-  const total = subtotalAfterDiscount + tax - pointsDiscount;
-  
-  // Points to earn: 15% of order total (after discount, before tax)
-  // CORRECTED: Award points based on 100 points = $1
-  // For $100 order, user gets 5% = $5 value = 500 points
-  const pointsToEarn = Math.floor((subtotalAfterDiscount * POINTS_REWARD_PERCENTAGE) / POINTS_TO_DOLLAR_RATE);
 
-  // ============================================================================
-  // HELPER FUNCTIONS
-  // ============================================================================
+  // Use quoted fee when available, fallback flat rate otherwise (never 0 for delivery)
+  const deliveryFee =
+    orderType === 'delivery'
+      ? (deliveryQuote ? deliveryQuote.fee : FALLBACK_DELIVERY_FEE)
+      : 0;
+  const total = subtotalAfterDiscount + tax + deliveryFee - pointsDiscount;
+
+  const pointsToEarn = Math.floor(
+    (subtotalAfterDiscount * POINTS_REWARD_PERCENTAGE) / POINTS_TO_DOLLAR_RATE
+  );
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
 
   const showToast = useCallback((type: 'success' | 'error' | 'info', message: string) => {
     setToastType(type);
@@ -271,46 +240,155 @@ function CheckoutContent() {
     return 'Address verification failed.';
   }, [isValidatingAddress, addressValidation]);
 
-  // ============================================================================
-  // ADDRESS VALIDATION
-  // ============================================================================
+  const isQuoteExpired = useCallback(() => {
+    if (!deliveryQuote?.expires) return true;
+    return Date.now() >= new Date(deliveryQuote.expires).getTime() - QUOTE_REFRESH_BUFFER_MS;
+  }, [deliveryQuote]);
 
-  const validateAddress = useCallback(async (address: string) => {
+  // ── Google Places autocomplete ────────────────────────────────────────────
+
+  const fetchPlaceSuggestions = useCallback(async (input: string) => {
+    if (!input || input.trim().length < 3 || !GOOGLE_PLACES_API_KEY) {
+      setPlaceSuggestions([]);
+      setShowSuggestions(false);
+      return;
+    }
+
+    setIsFetchingSuggestions(true);
+    try {
+      const url = new URL('https://maps.googleapis.com/maps/api/place/autocomplete/json');
+      url.searchParams.set('input', input);
+      url.searchParams.set('key', GOOGLE_PLACES_API_KEY);
+      url.searchParams.set('types', 'address');
+      // Bias toward US addresses — adjust or remove as needed
+      url.searchParams.set('components', 'country:us');
+
+      const response = await fetch(url.toString());
+      const data = await response.json();
+
+      if (data.status === 'OK' && data.predictions?.length > 0) {
+        setPlaceSuggestions(data.predictions.slice(0, 5));
+        setShowSuggestions(true);
+      } else {
+        setPlaceSuggestions([]);
+        setShowSuggestions(false);
+      }
+    } catch (error) {
+      console.error('Places autocomplete error:', error);
+      setPlaceSuggestions([]);
+      setShowSuggestions(false);
+    } finally {
+      setIsFetchingSuggestions(false);
+    }
+  }, []);
+
+  /**
+   * Called when the user taps a suggestion row.
+   * Optionally fetches the full formatted address via Place Details before
+   * committing — falls back to the description if the detail call fails.
+   */
+  const handleSelectSuggestion = useCallback(async (prediction: PlacesPrediction) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setShowSuggestions(false);
+    setPlaceSuggestions([]);
+    setSuggestionSelected(true);
+    Keyboard.dismiss();
+
+    let chosenAddress = prediction.description;
+
+    // Optionally enrich with Place Details for a cleaner formatted_address
+    if (GOOGLE_PLACES_API_KEY) {
+      try {
+        const url = new URL('https://maps.googleapis.com/maps/api/place/details/json');
+        url.searchParams.set('place_id', prediction.place_id);
+        url.searchParams.set('key', GOOGLE_PLACES_API_KEY);
+        url.searchParams.set('fields', 'formatted_address');
+
+        const response = await fetch(url.toString());
+        const data = await response.json();
+
+        if (data.status === 'OK' && data.result?.formatted_address) {
+          chosenAddress = data.result.formatted_address;
+        }
+      } catch {
+        // Use prediction.description as fallback — already set above
+      }
+    }
+
+    setDeliveryAddress(chosenAddress);
+    setValidatedAddress(chosenAddress);
+    setAddressTouched(true);
+
+    // Clear stale quote / validation so they re-run against the new address
+    setDeliveryQuote(null);
+    setQuoteError(null);
+    setAddressValidation(null);
+
+    // Trigger validation right away for the chosen address
+    validateAddress(chosenAddress);
+  }, []);
+
+  // Debounce Places API calls while the user types
+  const handleAddressChange = useCallback((text: string) => {
+    setDeliveryAddress(text);
+    setAddressTouched(true);
+    setSuggestionSelected(false);
+
+    // Reset stale state
+    setDeliveryQuote(null);
+    setQuoteError(null);
+
+    if (placesDebounceRef.current) clearTimeout(placesDebounceRef.current);
+
+    if (text.trim().length >= 3) {
+      placesDebounceRef.current = setTimeout(() => fetchPlaceSuggestions(text), 350);
+    } else {
+      setPlaceSuggestions([]);
+      setShowSuggestions(false);
+    }
+  }, [fetchPlaceSuggestions]);
+
+  // Clear suggestions on unmount
+  useEffect(() => {
+    return () => {
+      if (placesDebounceRef.current) clearTimeout(placesDebounceRef.current);
+    };
+  }, []);
+
+  // ── Address validation ────────────────────────────────────────────────────
+
+  const validateAddress = useCallback(async (address: string, apt?: string) => {
     if (!address || address.trim().length < 5) {
       setAddressValidation(null);
       return;
     }
-
     setIsValidatingAddress(true);
-
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) throw new Error('Not authenticated');
 
       const response = await fetch(`${SUPABASE_URL}/functions/v1/verify-address`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({ address }),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+        // Pass apt separately so the edge function can put it in street_address[1]
+        body: JSON.stringify({ address, apt }),
       });
 
       const result: AddressValidationResult = await response.json();
-      console.log('Address validation result:', result);
-      
       setAddressValidation(result);
-      
-      if (result.isValid && result.formattedAddress && result.confidence === 'high') {
-        setValidatedAddress(result.formattedAddress);
+
+      if (result.isValid) {
+        if (result.formattedAddress) {
+          setValidatedAddress(result.formattedAddress);
+        }
+        if (result.uberAddress) {
+          // Store the Uber Direct-formatted JSON string for use in quote + payment
+          setValidatedUberAddress(result.uberAddress);
+        }
       }
     } catch (error) {
       console.error('Address validation error:', error);
-      setAddressValidation({
-        success: false,
-        isValid: false,
-        error: 'Failed to validate address',
-      });
+      setAddressValidation({ success: false, isValid: false, error: 'Failed to validate address' });
     } finally {
       setIsValidatingAddress(false);
     }
@@ -320,25 +398,95 @@ function CheckoutContent() {
     if (addressValidation?.formattedAddress) {
       setDeliveryAddress(addressValidation.formattedAddress);
       setValidatedAddress(addressValidation.formattedAddress);
-      // Mark this as the final validated address - no need to revalidate
       setAddressTouched(false);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     }
   }, [addressValidation]);
 
-  // ============================================================================
-  // STRIPE PAYMENT SHEET INITIALIZATION
-  // ============================================================================
+  // ── Delivery quote ────────────────────────────────────────────────────────
 
-  // ============================================================================
-// PAYMENT SHEET INITIALIZATION (with all order data in metadata)
-// ============================================================================
+  const fetchDeliveryQuote = useCallback(async (address: string, uberAddress?: string) => {
+    setIsFetchingQuote(true);
+    setQuoteError(null);
+    try {
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      console.log('[checkout] session token:', session?.access_token?.slice(0, 20), '| error:', sessionError);
 
-const initializePaymentSheet = useCallback(async () => {
-  try {
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/get-delivery-quote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token}` },
+        // Prefer the Uber Direct-formatted JSON string; fall back to plain text
+        body: JSON.stringify({ dropoffAddress: uberAddress || address }),
+      });
+
+      const result = await response.json();
+
+      if (!result.success) {
+        setQuoteError(result.error ?? 'Delivery fee unavailable');
+        setDeliveryQuote(null);
+        return;
+      }
+
+      setDeliveryQuote(result as DeliveryQuote);
+      setQuoteError(null);
+    } catch (err) {
+      setQuoteError('Could not fetch delivery fee');
+      setDeliveryQuote(null);
+    } finally {
+      setIsFetchingQuote(false);
+    }
+  }, []);
+
+  // Fetch quote after address is validated
+  useEffect(() => {
+    if (
+      orderType === 'delivery' &&
+      addressValidation?.isValid &&
+      addressValidation.confidence !== 'low'
+    ) {
+      const addr = validatedAddress || deliveryAddress;
+      if (addr) fetchDeliveryQuote(addr, validatedUberAddress || undefined);
+    }
+  }, [addressValidation?.isValid, addressValidation?.confidence, orderType]);
+
+  useEffect(() => {
+    if (orderType !== 'delivery') {
+      setDeliveryQuote(null);
+      setQuoteError(null);
+    }
+  }, [orderType]);
+
+  // Auto-refresh quote ~60s before expiry
+  useEffect(() => {
+    if (!deliveryQuote?.expires || orderType !== 'delivery') return;
+    const msUntilRefresh =
+      new Date(deliveryQuote.expires).getTime() - QUOTE_REFRESH_BUFFER_MS - Date.now();
+    if (msUntilRefresh <= 0) return;
+    const timer = setTimeout(() => {
+      const addr = validatedAddress || deliveryAddress;
+      if (addr) fetchDeliveryQuote(addr, validatedUberAddress || undefined);
+    }, msUntilRefresh);
+    return () => clearTimeout(timer);
+  }, [deliveryQuote?.expires, orderType]);
+
+  // Debounced address validation (for manual typing — skipped when a suggestion was just selected)
+  useEffect(() => {
+    if (orderType !== 'delivery' || !addressTouched || !deliveryAddress.trim()) return;
+    if (suggestionSelected) return; // already triggered in handleSelectSuggestion
+    const id = setTimeout(() => validateAddress(deliveryAddress), 1000);
+    return () => clearTimeout(id);
+  }, [deliveryAddress, addressTouched, orderType, validateAddress, suggestionSelected]);
+
+  // Hide tab bar
+  useEffect(() => {
+    setTabBarVisible(false);
+    return () => setTabBarVisible(true);
+  }, [setTabBarVisible]);
+
+  // ── Payment sheet ─────────────────────────────────────────────────────────
+
+  const initializePaymentSheet = useCallback(async () => {
     if (!userProfile) throw new Error('User profile not found');
-
-    console.log('Initializing Stripe Payment Sheet...');
 
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) throw new Error('Not authenticated');
@@ -346,212 +494,156 @@ const initializePaymentSheet = useCallback(async () => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) throw new Error('User not found');
 
-    console.log('Current user ID:', user.id);
-
-    // Get or create Stripe customer
-    const { data: customerData, error: customerError } = await supabase
+    const { data: customerData } = await supabase
       .from('user_profiles')
       .select('stripe_customer_id')
       .eq('user_id', user.id)
       .single();
 
-    if (customerError) {
-      console.error('Error fetching customer data:', customerError);
-    }
-
     let customerId = customerData?.stripe_customer_id;
 
     if (!customerId) {
-      console.log('Creating Stripe customer...');
-      const createCustomerResponse = await fetch(`${SUPABASE_URL}/functions/v1/create-stripe-customer`, {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/create-stripe-customer`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({
-          email: userProfile?.email || user.email,
-          name: userProfile?.name,
-        }),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ email: userProfile?.email || user.email, name: userProfile?.name }),
       });
-
-      if (!createCustomerResponse.ok) {
-        const errorText = await createCustomerResponse.text();
-        console.error('Failed to create Stripe customer:', errorText);
-        throw new Error('Failed to create Stripe customer');
-      }
-
-      const { customerId: newCustomerId } = await createCustomerResponse.json();
-      customerId = newCustomerId;
-      console.log('Stripe customer created:', customerId);
+      if (!res.ok) throw new Error('Failed to create Stripe customer');
+      const { customerId: newId } = await res.json();
+      customerId = newId;
     }
 
-    // Calculate points used (convert dollars back to points)
-    const pointsUsed = usePoints ? Math.floor(pointsDiscount / POINTS_TO_DOLLAR_RATE) : 0;
+    if (orderType === 'delivery' && deliveryQuote && isQuoteExpired()) {
+      const addr = validatedAddress || deliveryAddress;
+      if (addr) await fetchDeliveryQuote(addr);
+    }
 
-    // Prepare order items for metadata
-    const orderItems = cart.map(item => ({
-      id: item.id,
-      name: item.name,
-      price: item.price,
-      quantity: item.quantity,
+    const pointsUsed = usePoints ? Math.floor(pointsDiscount / POINTS_TO_DOLLAR_RATE) : 0;
+    const orderItems = cart.map((item) => ({
+      id: item.id, name: item.name, price: item.price, quantity: item.quantity,
     }));
 
-    // Create payment intent with ALL order data in metadata
-    console.log('Creating payment intent with metadata...');
-    console.log('Order type:', orderType);
-    console.log('Delivery address:', orderType === 'delivery' ? (validatedAddress || deliveryAddress) : 'N/A');
-    
     const response = await fetch(`${SUPABASE_URL}/functions/v1/create-payment-intent`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${session.access_token}`,
-      },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
       body: JSON.stringify({
-        amount: Math.round(total * 100), // Convert to cents
+        amount: Math.round(total * 100),
         currency: 'usd',
         customerId,
         setupFutureUsage: 'off_session',
         metadata: {
-          // Required fields for order creation
           user_id: user.id,
-          order_type: orderType, // ← 'delivery' or 'pickup'
+          order_type: orderType,
+          // Human-readable address for receipts/display
           delivery_address: orderType === 'delivery' ? (validatedAddress || deliveryAddress) : '',
+          // Uber Direct-formatted JSON string — used by stripe-webhook to call create-delivery
+          delivery_address_uber: orderType === 'delivery' ? (validatedUberAddress || '') : '',
           pickup_notes: pickupNotes || '',
-          
-          // Order details
           items: JSON.stringify(orderItems),
           subtotal: subtotal.toFixed(2),
           tax: tax.toFixed(2),
+          delivery_fee: deliveryFee.toFixed(2),
           total: total.toFixed(2),
           discount: discount.toFixed(2),
-          
-          // Points
           points_earned: pointsToEarn.toString(),
           points_used: pointsUsed.toString(),
           points_discount: pointsDiscount.toFixed(2),
-          
-          // Additional info
           item_count: cart.length.toString(),
           customer_name: userProfile?.name || '',
           customer_email: userProfile?.email || user.email || '',
           customer_phone: userProfile?.phone || '',
+          uber_quote_id: deliveryQuote?.quoteId || '',
         },
       }),
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Error creating payment intent:', errorText);
-      throw new Error('Failed to create payment intent');
+    if (!response.ok) throw new Error('Failed to create payment intent');
+    return response.json();
+  }, [
+    total, orderType, cart, userProfile, validatedAddress, deliveryAddress, pickupNotes,
+    subtotal, tax, discount, deliveryFee, pointsToEarn, usePoints, pointsDiscount,
+    deliveryQuote, isQuoteExpired, fetchDeliveryQuote,
+  ]);
+
+  // ── Order polling ─────────────────────────────────────────────────────────
+
+  const waitForOrderCreation = useCallback(async (paymentIntentId: string): Promise<string> => {
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const { data: order } = await supabase
+        .from('orders')
+        .select('id, order_type')
+        .eq('payment_id', paymentIntentId)
+        .maybeSingle<Order>();
+
+      if (order?.id) return order.id;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
+    throw new Error(
+      'Order creation timed out. Your payment was successful. Contact support with payment ID: ' +
+        paymentIntentId
+    );
+  }, []);
 
-    const { clientSecret, ephemeralKey, paymentIntentId, customerId: returnedCustomerId } = await response.json();
-    console.log('Payment intent created:', paymentIntentId);
-    console.log('✓ Metadata included - Order type:', orderType);
+  // ── Order placement ───────────────────────────────────────────────────────
 
-    return { clientSecret, ephemeralKey, paymentIntentId, customerId: returnedCustomerId };
-  } catch (error) {
-    console.error('Error in initializePaymentSheet:', error);
-    throw error;
-  }
-}, [total, orderType, cart, userProfile, validatedAddress, deliveryAddress, pickupNotes, 
-    subtotal, tax, discount, pointsToEarn, usePoints, pointsDiscount]);
+  const proceedWithPayment = useCallback(async () => {
+    setProcessing(true);
+    try {
+      const paymentData = await initializePaymentSheet();
+      if (!paymentData) throw new Error('Failed to initialize payment');
 
+      const { clientSecret, ephemeralKey, paymentIntentId, customerId } = paymentData;
+      const returnURL = Linking.createURL('checkout');
 
-  // ============================================================================
-  // ORDER CREATION (AFTER SUCCESSFUL PAYMENT)
-  // ============================================================================
+      const initConfig: any = {
+        merchantDisplayName: 'Jagabans LA',
+        paymentIntentClientSecret: clientSecret,
+        allowsDelayedPaymentMethods: false,
+        returnURL,
+        defaultBillingDetails: { name: userProfile?.name, email: userProfile?.email },
+        googlePay: { merchantCountryCode: 'US', testEnv: false, currencyCode: 'usd' },
+      };
 
-  // const createOrderAfterPayment = useCallback(async (paymentIntentId: string) => {
-  //   if (!userProfile) throw new Error('User profile not found');
+      if (customerId && ephemeralKey) {
+        initConfig.customerId = customerId;
+        initConfig.customerEphemeralKeySecret = ephemeralKey;
+      }
 
-  //   console.log('Creating order after successful payment...');
-  //   console.log('Payment Intent ID:', paymentIntentId);
-  //   console.log('Points to earn:', pointsToEarn);
+      const { error: initError } = await initPaymentSheet(initConfig);
+      if (initError) throw new Error(initError.message);
 
-  //   // Create order
-  //   const { data: order, error: orderError } = await supabase
-  //     .from('orders')
-  //     .insert({
-  //       user_id: userProfile.id,
-  //       total: total,
-  //       points_earned: pointsToEarn,
-  //       status: 'confirmed',
-  //       payment_status: 'succeeded',
-  //       payment_id: paymentIntentId,
-  //       delivery_address: orderType === 'delivery' ? (validatedAddress || deliveryAddress) : null,
-  //       pickup_notes: orderType === 'pickup' ? pickupNotes : null,
-  //     })
-  //     .select()
-  //     .single<Order>();
+      const { error: presentError } = await presentPaymentSheet();
+      if (presentError) {
+        if (presentError.code === 'Canceled') {
+          showToast('info', 'Payment cancelled');
+          setProcessing(false);
+          return;
+        }
+        throw new Error(presentError.message);
+      }
 
-  //   if (orderError || !order) {
-  //     console.error('Error creating order:', orderError);
-  //     throw new Error('Failed to create order');
-  //   }
+      showToast('success', 'Payment successful! Creating your order...');
 
-  //   console.log('Order created:', order.id);
+      const orderId = await waitForOrderCreation(paymentIntentId);
 
-  //   // Create order items
-  //   const orderItems = cart.map(item => ({
-  //     order_id: order.id,
-  //     menu_item_id: item.id,
-  //     name: item.name,
-  //     price: item.price,
-  //     quantity: item.quantity,
-  //   }));
+      clearCart();
+      await loadUserProfile();
 
-  //   const { error: itemsError } = await supabase
-  //     .from('order_items')
-  //     .insert(orderItems);
-
-  //   if (itemsError) {
-  //     console.error('Error creating order items:', itemsError);
-  //     throw new Error('Failed to create order items');
-  //   }
-
-  //   // Deduct points if used
-  //   if (usePoints && pointsDiscount > 0) {
-  //     // CORRECTED: Convert dollars back to points (divide by 0.01)
-  //     const pointsToDeduct = Math.floor(pointsDiscount / POINTS_TO_DOLLAR_RATE);
-  //     const { error: pointsError } = await supabase
-  //       .from('user_profiles')
-  //       .update({ points: availablePoints - pointsToDeduct })
-  //       .eq('id', userProfile.id);
-
-  //     if (pointsError) {
-  //       console.error('Error deducting points:', pointsError);
-  //     } else {
-  //       console.log(`✓ Deducted ${pointsToDeduct} points (worth $${pointsDiscount.toFixed(2)})`);
-  //     }
-  //   }
-
-  //   // Award points for this order
-  //   const newPointsTotal = availablePoints - (usePoints ? Math.floor(pointsDiscount / POINTS_TO_DOLLAR_RATE) : 0) + pointsToEarn;
-  //   const { error: awardPointsError } = await supabase
-  //     .from('user_profiles')
-  //     .update({ points: newPointsTotal })
-  //     .eq('id', userProfile.id);
-
-  //   if (awardPointsError) {
-  //     console.error('Error awarding points:', awardPointsError);
-  //   } else {
-  //     console.log(`✓ Awarded ${pointsToEarn} points`);
-  //   }
-
-  //   return order.id;
-  // }, [userProfile, total, pointsToEarn, orderType, validatedAddress, deliveryAddress, pickupNotes, cart, usePoints, pointsDiscount, availablePoints]);
-
-  // ============================================================================
-  // ORDER PLACEMENT
-  // ============================================================================
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      setTimeout(() => {
+        setProcessing(false);
+        router.push({ pathname: '/order-confirmation', params: { orderId } });
+      }, 100);
+    } catch (error) {
+      showToast('error', error instanceof Error ? error.message : 'Failed to place order. Please try again.');
+      setProcessing(false);
+    }
+  }, [
+    initializePaymentSheet, initPaymentSheet, presentPaymentSheet,
+    waitForOrderCreation, clearCart, loadUserProfile, router, showToast, userProfile,
+  ]);
 
   const handlePlaceOrder = useCallback(async () => {
-    console.log('=== Starting Checkout Flow ===');
-
-    // Validate address if delivery
     if (orderType === 'delivery') {
       if (!deliveryAddress.trim()) {
         showToast('error', 'Please enter a delivery address.');
@@ -562,537 +654,343 @@ const initializePaymentSheet = useCallback(async () => {
         if (!addressValidation.isValid) {
           Alert.alert(
             'Address Verification',
-            'The address you entered could not be verified. Please check and correct your address before continuing.',
+            'The address could not be verified. Please check and correct it before continuing.',
             [{ text: 'OK' }]
           );
           return;
         }
-
         if (addressValidation.confidence === 'low') {
           Alert.alert(
             'Address Verification',
-            'The address you entered has low confidence. We recommend reviewing it for accuracy.',
+            'This address has low confidence. We recommend reviewing it.',
             [
               { text: 'Review Address', style: 'cancel' },
-              { 
-                text: 'Continue Anyway', 
-                onPress: async () => {
-                  await proceedWithPayment();
-                },
-                style: 'destructive'
-              }
+              { text: 'Continue Anyway', style: 'destructive', onPress: proceedWithPayment },
             ]
           );
           return;
         }
       }
+
+      // No Uber quote → fallback fee ($12.99) is already included in total, proceed normally
     }
 
     await proceedWithPayment();
-  }, [orderType, deliveryAddress, addressTouched, addressValidation, showToast]);
+  }, [orderType, deliveryAddress, addressTouched, addressValidation, proceedWithPayment]);
 
-  // ============================================================================
-// OPTIONAL: Realtime approach (more efficient but requires Realtime enabled)
-// ============================================================================
+  // ── Styles ────────────────────────────────────────────────────────────────
 
-const waitForOrderCreation = useCallback(async (paymentIntentId: string): Promise<string> => {
-  const maxAttempts = 30; // 30 attempts
-  const delayMs = 1000; // 1 second between attempts
-  
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const { data: order } = await supabase
-      .from('orders')
-      .select('id, order_type')
-      .eq('payment_id', paymentIntentId)
-      .maybeSingle<Order>();
+  const styles = StyleSheet.create({
+    gradientContainer: { flex: 1 },
+    safeArea: { flex: 1 },
+    container: { flex: 1 },
+    content: { padding: 20 },
+    header: {
+      flexDirection: 'row', alignItems: 'center',
+      paddingHorizontal: 20, paddingVertical: 16,
+      borderBottomWidth: 2, borderBottomColor: currentColors.border,
+    },
+    backButton: {
+      width: 40, height: 40, borderRadius: 0,
+      justifyContent: 'center', alignItems: 'center',
+      boxShadow: '0px 4px 12px rgba(212, 175, 55, 0.3)', elevation: 4,
+    },
+    infoBanner: {
+      flexDirection: 'row', padding: 16, borderRadius: 0, marginBottom: 20,
+      gap: 12, borderWidth: 2, borderColor: currentColors.border,
+      boxShadow: '0px 4px 12px rgba(74, 215, 194, 0.2)', elevation: 4,
+    },
+    infoText: { flex: 1, fontSize: 14, fontFamily: 'Inter_400Regular', lineHeight: 20, color: currentColors.text },
+    section: { marginBottom: 24 },
+    sectionTitle: {
+      fontSize: 18, fontFamily: 'PlayfairDisplay_700Bold', marginBottom: 12,
+      color: currentColors.text, letterSpacing: 0.5,
+    },
+    orderTypeSelector: { flexDirection: 'row', gap: 12, marginBottom: 16 },
+    orderTypeButton: {
+      flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+      padding: 16, borderRadius: 0, borderWidth: 2, gap: 8,
+      boxShadow: '0px 4px 12px rgba(212, 175, 55, 0.25)', elevation: 4,
+    },
+    orderTypeText: { fontSize: 16, fontFamily: 'Inter_600SemiBold' },
+    inputContainer: { position: 'relative' },
+    input: {
+      borderRadius: 0, padding: 16, fontSize: 16, fontFamily: 'Inter_400Regular',
+      minHeight: 80, boxShadow: '0px 4px 12px rgba(212, 175, 55, 0.25)', elevation: 4,
+      paddingRight: 48, backgroundColor: currentColors.card, color: currentColors.text,
+      borderWidth: 2, borderColor: currentColors.border,
+    },
+    inputWithValidation: { borderWidth: 2 },
+    validationIconContainer: { position: 'absolute', right: 16, top: 16 },
+    validationMessage: { flexDirection: 'row', alignItems: 'center', marginTop: 8, gap: 8, paddingHorizontal: 4 },
+    validationMessageText: { fontSize: 13, fontFamily: 'Inter_400Regular', flex: 1 },
+    formattedAddressSuggestion: {
+      marginTop: 12, padding: 12, borderRadius: 0, borderWidth: 2,
+      backgroundColor: currentColors.card, borderColor: currentColors.border,
+      boxShadow: '0px 4px 12px rgba(74, 215, 194, 0.25)', elevation: 4,
+    },
+    suggestionHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
+    suggestionTitle: { fontSize: 14, fontFamily: 'Inter_600SemiBold', color: currentColors.text },
+    suggestionAddress: { fontSize: 14, fontFamily: 'Inter_400Regular', marginBottom: 8, lineHeight: 20, color: currentColors.textSecondary },
+    useSuggestionButton: { borderRadius: 0, boxShadow: '0px 4px 12px rgba(74, 215, 194, 0.3)', elevation: 4 },
+    useSuggestionButtonInner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 8, gap: 6 },
+    useSuggestionButtonText: { fontSize: 13, fontFamily: 'Inter_600SemiBold', color: currentColors.background },
+    // ── Google Places suggestion dropdown ───────────────────────────────────
+    suggestionsDropdown: {
+      marginTop: 4,
+      borderWidth: 2,
+      borderColor: currentColors.border,
+      backgroundColor: currentColors.card,
+      borderRadius: 0,
+      overflow: 'hidden',
+      boxShadow: '0px 8px 24px rgba(0,0,0,0.18)',
+      elevation: 12,
+      zIndex: 999,
+    },
+    suggestionRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+      gap: 10,
+      borderBottomWidth: 1,
+      borderBottomColor: currentColors.border,
+    },
+    suggestionRowLast: {
+      borderBottomWidth: 0,
+    },
+    suggestionIconWrapper: {
+      width: 28,
+      height: 28,
+      borderRadius: 0,
+      backgroundColor: currentColors.background,
+      borderWidth: 1,
+      borderColor: currentColors.border,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    suggestionTextContainer: { flex: 1 },
+    suggestionMainText: {
+      fontSize: 14,
+      fontFamily: 'Inter_600SemiBold',
+      color: currentColors.text,
+      lineHeight: 18,
+    },
+    suggestionSecondaryText: {
+      fontSize: 12,
+      fontFamily: 'Inter_400Regular',
+      color: currentColors.textSecondary,
+      marginTop: 2,
+    },
+    suggestionsLoadingRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+      gap: 10,
+    },
+    suggestionsLoadingText: {
+      fontSize: 13,
+      fontFamily: 'Inter_400Regular',
+      color: currentColors.textSecondary,
+    },
+    poweredByGoogle: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'flex-end',
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+      borderTopWidth: 1,
+      borderTopColor: currentColors.border,
+      gap: 4,
+    },
+    poweredByGoogleText: {
+      fontSize: 10,
+      fontFamily: 'Inter_400Regular',
+      color: currentColors.textSecondary,
+    },
+    // Quote card
+    quoteCard: {
+      marginTop: 12, padding: 14, borderRadius: 0, borderWidth: 2,
+      flexDirection: 'row', alignItems: 'center', gap: 12,
+    },
+    quoteCardText: { flex: 1 },
+    quoteCardFee: { fontSize: 15, fontFamily: 'Inter_700Bold', color: currentColors.text },
+    quoteCardMeta: { fontSize: 13, fontFamily: 'Inter_400Regular', color: currentColors.textSecondary, marginTop: 2 },
+    quoteExpiry: { fontSize: 11, fontFamily: 'Inter_400Regular', color: currentColors.textSecondary, marginTop: 3 },
+    // Summary
+    summaryCard: {
+      borderRadius: 0, padding: 20, boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.3)',
+      elevation: 8, borderWidth: 2, borderColor: currentColors.border,
+    },
+    summaryTitle: { fontSize: 18, fontFamily: 'PlayfairDisplay_700Bold', marginBottom: 16, color: currentColors.text, letterSpacing: 0.5 },
+    summaryRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 },
+    summaryLabel: { fontSize: 16, fontFamily: 'Inter_400Regular', color: currentColors.textSecondary },
+    summaryValue: { fontSize: 16, fontFamily: 'Inter_600SemiBold', color: currentColors.text },
+    summaryRowTotal: { borderTopWidth: 2, paddingTop: 12, marginTop: 4, borderTopColor: currentColors.border },
+    summaryLabelTotal: { fontSize: 18, fontFamily: 'PlayfairDisplay_700Bold', color: currentColors.text },
+    summaryValueTotal: { fontSize: 20, fontFamily: 'Inter_700Bold', color: currentColors.secondary },
+    pointsEarnCard: {
+      flexDirection: 'row', alignItems: 'center', padding: 12, borderRadius: 0,
+      marginTop: 16, gap: 8, backgroundColor: currentColors.background,
+      borderWidth: 2, borderColor: currentColors.border,
+    },
+    pointsEarnText: { flex: 1, fontSize: 14, fontFamily: 'Inter_600SemiBold', color: currentColors.text },
+    paymentMethodsInfo: {
+      flexDirection: 'row', alignItems: 'center', padding: 16, borderRadius: 0,
+      borderWidth: 2, borderColor: currentColors.border, backgroundColor: currentColors.card,
+      gap: 12, boxShadow: '0px 4px 12px rgba(74, 215, 194, 0.2)', elevation: 4,
+    },
+    paymentMethodsInfoText: { flex: 1, fontSize: 14, fontFamily: 'Inter_400Regular', lineHeight: 20, color: currentColors.text },
+    footer: {
+      padding: 20, borderTopWidth: 2, borderTopColor: currentColors.border,
+      boxShadow: '0px -6px 20px rgba(74, 215, 194, 0.3)', elevation: 10,
+    },
+    placeOrderButton: { borderRadius: 0, boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.5)', elevation: 10 },
+    placeOrderButtonInner: { paddingVertical: 16, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 12 },
+    placeOrderButtonText: { fontSize: 18, fontFamily: 'Inter_700Bold', color: currentColors.background },
+  });
 
-    if (order?.id) {
-      console.log('✓ Order found:', order.id);
-      console.log('✓ Order type:', order.order_type);
-      return order.id;
-    }
+  // ── Google Places dropdown render ─────────────────────────────────────────
 
-    console.log(`Waiting for order... (attempt ${attempt + 1}/${maxAttempts})`);
-    await new Promise(resolve => setTimeout(resolve, delayMs));
-  }
+  const renderPlacesSuggestions = () => {
+    if (orderType !== 'delivery') return null;
+    if (!showSuggestions && !isFetchingSuggestions) return null;
 
-  throw new Error(
-    'Order creation timed out. Your payment was successful. ' +
-    'Please contact support with this payment ID: ' + paymentIntentId
-  );
-}, []);
+    return (
+      <View style={styles.suggestionsDropdown}>
+        {isFetchingSuggestions && placeSuggestions.length === 0 ? (
+          <View style={styles.suggestionsLoadingRow}>
+            <ActivityIndicator size="small" color={currentColors.primary} />
+            <Text style={styles.suggestionsLoadingText}>Finding addresses...</Text>
+          </View>
+        ) : (
+          <>
+            {placeSuggestions.map((prediction, index) => (
+              <Pressable
+                key={prediction.place_id}
+                style={({ pressed }) => [
+                  styles.suggestionRow,
+                  index === placeSuggestions.length - 1 && styles.suggestionRowLast,
+                  pressed && { backgroundColor: currentColors.background },
+                ]}
+                onPress={() => handleSelectSuggestion(prediction)}
+              >
+                <View style={styles.suggestionIconWrapper}>
+                  <IconSymbol name="location-on" size={14} color={currentColors.primary} />
+                </View>
+                <View style={styles.suggestionTextContainer}>
+                  <Text style={styles.suggestionMainText} numberOfLines={1}>
+                    {prediction.structured_formatting.main_text}
+                  </Text>
+                  <Text style={styles.suggestionSecondaryText} numberOfLines={1}>
+                    {prediction.structured_formatting.secondary_text}
+                  </Text>
+                </View>
+                <IconSymbol name="arrow-forward" size={14} color={currentColors.textSecondary} />
+              </Pressable>
+            ))}
+            <View style={styles.poweredByGoogle}>
+              <Text style={styles.poweredByGoogleText}>powered by Google</Text>
+            </View>
+          </>
+        )}
+      </View>
+    );
+  };
 
-// ============================================================================
-// PAYMENT FLOW (simplified - no order creation in frontend)
-// ============================================================================
+  // ── Quote card render ─────────────────────────────────────────────────────
 
-const proceedWithPayment = useCallback(async () => {
-  setProcessing(true);
+  const renderDeliveryQuoteCard = () => {
+    if (orderType !== 'delivery') return null;
 
-  try {
-    // Step 1: Initialize Payment Sheet and get payment intent
-    const paymentData = await initializePaymentSheet();
-    
-    if (!paymentData) {
-      throw new Error('Failed to initialize payment');
-    }
-
-    const { clientSecret, ephemeralKey, paymentIntentId, customerId } = paymentData;
-
-    // Step 2: Configure Payment Sheet
-    const returnURL = Linking.createURL('checkout');
-    console.log('Return URL:', returnURL);
-
-    const initConfig: any = {
-      merchantDisplayName: 'Jagabans LA',
-      paymentIntentClientSecret: clientSecret,
-      allowsDelayedPaymentMethods: false,
-      returnURL: returnURL,
-      defaultBillingDetails: {
-        name: userProfile?.name,
-        email: userProfile?.email,
-      },
-      googlePay: {
-        merchantCountryCode: 'US',
-        testEnv: false,
-        currencyCode: 'usd',
-      },
-    };
-
-    // Add customer and ephemeral key if both are present
-    if (customerId && ephemeralKey) {
-      console.log('✓ Adding customer and ephemeral key to Payment Sheet config');
-      initConfig.customerId = customerId;
-      initConfig.customerEphemeralKeySecret = ephemeralKey;
-    } else {
-      console.warn('⚠️ Customer ID or ephemeral key missing - saved cards will not be available');
-    }
-
-    const { error: initError } = await initPaymentSheet(initConfig);
-
-    if (initError) {
-      console.error('Error initializing payment sheet:', initError);
-      throw new Error(initError.message);
-    }
-
-    console.log('✓ Payment Sheet initialized successfully');
-
-    // Step 3: Present Payment Sheet
-    console.log('Presenting Payment Sheet...');
-    const { error: presentError } = await presentPaymentSheet();
-
-    if (presentError) {
-      if (presentError.code === 'Canceled') {
-        console.log('Payment cancelled by user');
-        showToast('info', 'Payment cancelled');
-        setProcessing(false);
-        return;
-      }
-      console.error('Payment sheet error:', presentError);
-      throw new Error(presentError.message);
-    }
-
-    console.log('✓ Payment completed successfully');
-    showToast('success', 'Payment successful! Creating your order...');
-
-    // Step 4: Wait for webhook to create order (poll for order)
-    const orderId = await waitForOrderCreation(paymentIntentId);
-    
-    if (!orderId) {
-      throw new Error(
-        'Order creation timed out. Your payment was successful. ' +
-        'Please contact support with this payment ID: ' + paymentIntentId
+    if (isFetchingQuote) {
+      return (
+        <LinearGradient
+          colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
+          start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+          style={[styles.quoteCard, { borderColor: currentColors.border }]}
+        >
+          <ActivityIndicator size="small" color={currentColors.primary} />
+          <Text style={styles.quoteCardMeta}>Getting delivery fee...</Text>
+        </LinearGradient>
       );
     }
 
-    console.log('✓ Order confirmed:', orderId);
-
-    // Step 5: Clear cart and reload profile (to get updated points)
-    clearCart();
-    await loadUserProfile();
-
-    // Step 6: Navigate to confirmation
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    
-    setTimeout(() => {
-      setProcessing(false);
-      router.push({
-        pathname: '/order-confirmation',
-        params: { orderId },
-      });
-    }, 100);
-
-  } catch (error) {
-    console.error('Order placement error:', error);
-    const errorMessage = error instanceof Error 
-      ? error.message 
-      : 'Failed to place order. Please try again.';
-    showToast('error', errorMessage);
-    setProcessing(false);
-  }
-}, [initializePaymentSheet, initPaymentSheet, presentPaymentSheet, waitForOrderCreation, 
-    clearCart, loadUserProfile, router, showToast, userProfile]);
-
-
-  // ============================================================================
-  // EFFECTS
-  // ============================================================================
-
-  useEffect(() => {
-    setTabBarVisible(false);
-    return () => setTabBarVisible(true);
-  }, [setTabBarVisible]);
-
-  useEffect(() => {
-    if (orderType !== 'delivery' || !addressTouched || !deliveryAddress.trim()) {
-      return;
+    if (quoteError || (!isFetchingQuote && !deliveryQuote)) {
+      // No Uber quote available — show flat fallback fee
+      return (
+        <LinearGradient
+          colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
+          start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+          style={[styles.quoteCard, { borderColor: currentColors.border }]}
+        >
+          <IconSymbol name="delivery-dining" size={20} color={currentColors.primary} />
+          <View style={styles.quoteCardText}>
+            <Text style={styles.quoteCardFee}>Delivery fee: ${FALLBACK_DELIVERY_FEE.toFixed(2)}</Text>
+            <Text style={styles.quoteCardMeta}>Standard delivery rate</Text>
+          </View>
+        </LinearGradient>
+      );
     }
-    const timeoutId = setTimeout(() => validateAddress(deliveryAddress), 1000);
-    return () => clearTimeout(timeoutId);
-  }, [deliveryAddress, addressTouched, orderType, validateAddress]);
 
-  // ============================================================================
-  // STYLES
-  // ============================================================================
+    if (deliveryQuote) {
+      const expiresIn = Math.max(
+        0,
+        Math.round((new Date(deliveryQuote.expires).getTime() - Date.now()) / 60_000)
+      );
+      return (
+        <LinearGradient
+          colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
+          start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+          style={[styles.quoteCard, { borderColor: currentColors.primary }]}
+        >
+          <IconSymbol name="delivery-dining" size={20} color={currentColors.primary} />
+          <View style={styles.quoteCardText}>
+            <Text style={styles.quoteCardFee}>
+              Delivery fee: ${deliveryQuote.fee.toFixed(2)}
+            </Text>
+            <Text style={styles.quoteCardMeta}>
+              ~{deliveryQuote.duration} min · courier arrives in ~{deliveryQuote.pickupDuration} min
+            </Text>
+            <Text style={styles.quoteExpiry}>
+              Quote valid for {expiresIn} min · auto-refreshes
+            </Text>
+          </View>
+        </LinearGradient>
+      );
+    }
 
-  const styles = StyleSheet.create({
-    gradientContainer: {
-      flex: 1,
-    },
-    safeArea: {
-      flex: 1,
-    },
-    container: {
-      flex: 1,
-    },
-    content: {
-      padding: 20,
-    },
-    header: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      paddingHorizontal: 20,
-      paddingVertical: 16,
-      borderBottomWidth: 2,
-      borderBottomColor: currentColors.border,
-    },
-    backButton: {
-      width: 40,
-      height: 40,
-      borderRadius: 0,
-      justifyContent: 'center',
-      alignItems: 'center',
-      boxShadow: '0px 4px 12px rgba(212, 175, 55, 0.3)',
-      elevation: 4,
-    },
-    infoBanner: {
-      flexDirection: 'row',
-      padding: 16,
-      borderRadius: 0,
-      marginBottom: 20,
-      gap: 12,
-      borderWidth: 2,
-      borderColor: currentColors.border,
-      boxShadow: '0px 4px 12px rgba(74, 215, 194, 0.2)',
-      elevation: 4,
-    },
-    infoText: {
-      flex: 1,
-      fontSize: 14,
-      fontFamily: 'Inter_400Regular',
-      lineHeight: 20,
-      color: currentColors.text,
-    },
-    section: {
-      marginBottom: 24,
-    },
-    sectionTitle: {
-      fontSize: 18,
-      fontFamily: 'PlayfairDisplay_700Bold',
-      marginBottom: 12,
-      color: currentColors.text,
-      letterSpacing: 0.5,
-    },
-    orderTypeSelector: {
-      flexDirection: 'row',
-      gap: 12,
-      marginBottom: 16,
-    },
-    orderTypeButton: {
-      flex: 1,
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: 16,
-      borderRadius: 0,
-      borderWidth: 2,
-      gap: 8,
-      boxShadow: '0px 4px 12px rgba(212, 175, 55, 0.25)',
-      elevation: 4,
-    },
-    orderTypeText: {
-      fontSize: 16,
-      fontFamily: 'Inter_600SemiBold',
-    },
-    inputContainer: {
-      position: 'relative',
-    },
-    input: {
-      borderRadius: 0,
-      padding: 16,
-      fontSize: 16,
-      fontFamily: 'Inter_400Regular',
-      minHeight: 80,
-      boxShadow: '0px 4px 12px rgba(212, 175, 55, 0.25)',
-      elevation: 4,
-      paddingRight: 48,
-      backgroundColor: currentColors.card,
-      color: currentColors.text,
-      borderWidth: 2,
-      borderColor: currentColors.border,
-    },
-    inputWithValidation: {
-      borderWidth: 2,
-    },
-    validationIconContainer: {
-      position: 'absolute',
-      right: 16,
-      top: 16,
-    },
-    validationMessage: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      marginTop: 8,
-      gap: 8,
-      paddingHorizontal: 4,
-    },
-    validationMessageText: {
-      fontSize: 13,
-      fontFamily: 'Inter_400Regular',
-      flex: 1,
-    },
-    formattedAddressSuggestion: {
-      marginTop: 12,
-      padding: 12,
-      borderRadius: 0,
-      borderWidth: 2,
-      backgroundColor: currentColors.card,
-      borderColor: currentColors.border,
-      boxShadow: '0px 4px 12px rgba(74, 215, 194, 0.25)',
-      elevation: 4,
-    },
-    suggestionHeader: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 8,
-      marginBottom: 8,
-    },
-    suggestionTitle: {
-      fontSize: 14,
-      fontFamily: 'Inter_600SemiBold',
-      color: currentColors.text,
-    },
-    suggestionAddress: {
-      fontSize: 14,
-      fontFamily: 'Inter_400Regular',
-      marginBottom: 8,
-      lineHeight: 20,
-      color: currentColors.textSecondary,
-    },
-    useSuggestionButton: {
-      borderRadius: 0,
-      boxShadow: '0px 4px 12px rgba(74, 215, 194, 0.3)',
-      elevation: 4,
-    },
-    useSuggestionButtonInner: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: 8,
-      gap: 6,
-    },
-    useSuggestionButtonText: {
-      fontSize: 13,
-      fontFamily: 'Inter_600SemiBold',
-      color: currentColors.background,
-    },
-    pointsToggle: {
-      borderRadius: 0,
-      padding: 16,
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      boxShadow: '0px 4px 12px rgba(212, 175, 55, 0.25)',
-      elevation: 4,
-      borderWidth: 2,
-      borderColor: currentColors.border,
-    },
-    pointsToggleLeft: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 12,
-      flex: 1,
-    },
-    pointsToggleInfo: {
-      flex: 1,
-    },
-    pointsToggleTitle: {
-      fontSize: 16,
-      fontFamily: 'Inter_600SemiBold',
-      color: currentColors.text,
-    },
-    pointsToggleSubtitle: {
-      fontSize: 14,
-      fontFamily: 'Inter_400Regular',
-      marginTop: 2,
-      color: currentColors.textSecondary,
-    },
-    checkbox: {
-      width: 24,
-      height: 24,
-      borderRadius: 0,
-      borderWidth: 2,
-      justifyContent: 'center',
-      alignItems: 'center',
-      borderColor: currentColors.border,
-    },
-    summaryCard: {
-      borderRadius: 0,
-      padding: 20,
-      boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.3)',
-      elevation: 8,
-      borderWidth: 2,
-      borderColor: currentColors.border,
-    },
-    summaryTitle: {
-      fontSize: 18,
-      fontFamily: 'PlayfairDisplay_700Bold',
-      marginBottom: 16,
-      color: currentColors.text,
-      letterSpacing: 0.5,
-    },
-    summaryRow: {
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-      marginBottom: 12,
-    },
-    summaryLabel: {
-      fontSize: 16,
-      fontFamily: 'Inter_400Regular',
-      color: currentColors.textSecondary,
-    },
-    summaryValue: {
-      fontSize: 16,
-      fontFamily: 'Inter_600SemiBold',
-      color: currentColors.text,
-    },
-    summaryRowTotal: {
-      borderTopWidth: 2,
-      paddingTop: 12,
-      marginTop: 4,
-      borderTopColor: currentColors.border,
-    },
-    summaryLabelTotal: {
-      fontSize: 18,
-      fontFamily: 'PlayfairDisplay_700Bold',
-      color: currentColors.text,
-    },
-    summaryValueTotal: {
-      fontSize: 20,
-      fontFamily: 'Inter_700Bold',
-      color: currentColors.secondary,
-    },
-    pointsEarnCard: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      padding: 12,
-      borderRadius: 0,
-      marginTop: 16,
-      gap: 8,
-      backgroundColor: currentColors.background,
-      borderWidth: 2,
-      borderColor: currentColors.border,
-    },
-    pointsEarnText: {
-      flex: 1,
-      fontSize: 14,
-      fontFamily: 'Inter_600SemiBold',
-      color: currentColors.text,
-    },
-    footer: {
-      padding: 20,
-      borderTopWidth: 2,
-      borderTopColor: currentColors.border,
-      boxShadow: '0px -6px 20px rgba(74, 215, 194, 0.3)',
-      elevation: 10,
-    },
-    placeOrderButton: {
-      borderRadius: 0,
-      boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.5)',
-      elevation: 10,
-    },
-    placeOrderButtonInner: {
-      paddingVertical: 16,
-      alignItems: 'center',
-      flexDirection: 'row',
-      justifyContent: 'center',
-      gap: 12,
-    },
-    placeOrderButtonText: {
-      fontSize: 18,
-      fontFamily: 'Inter_700Bold',
-      color: currentColors.background,
-    },
-    paymentMethodsInfo: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      padding: 16,
-      borderRadius: 0,
-      borderWidth: 2,
-      borderColor: currentColors.border,
-      backgroundColor: currentColors.card,
-      gap: 12,
-      boxShadow: '0px 4px 12px rgba(74, 215, 194, 0.2)',
-      elevation: 4,
-    },
-    paymentMethodsInfoText: {
-      flex: 1,
-      fontSize: 14,
-      fontFamily: 'Inter_400Regular',
-      lineHeight: 20,
-      color: currentColors.text,
-    },
-  });
+    return null;
+  };
 
-  // ============================================================================
-  // RENDER
-  // ============================================================================
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <LinearGradient
-      colors={[currentColors.gradientStart || currentColors.background, currentColors.gradientMid || currentColors.background, currentColors.gradientEnd || currentColors.background]}
-      start={{ x: 0, y: 0 }}
-      end={{ x: 0, y: 1 }}
+      colors={[
+        currentColors.gradientStart || currentColors.background,
+        currentColors.gradientMid || currentColors.background,
+        currentColors.gradientEnd || currentColors.background,
+      ]}
+      start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
       style={styles.gradientContainer}
     >
       <SafeAreaView style={styles.safeArea} edges={['bottom']}>
+
+        {/* Header */}
         <LinearGradient
           colors={[currentColors.headerGradientStart || currentColors.card, currentColors.headerGradientEnd || currentColors.card]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 0 }}
+          start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
           style={styles.header}
         >
           <LinearGradient
             colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
+            start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
             style={styles.backButton}
           >
             <Pressable
-              onPress={() => {
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                router.back();
-              }}
+              onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); router.back(); }}
               style={{ padding: 8 }}
             >
               <IconSymbol name="arrow-back" size={24} color={currentColors.secondary} />
@@ -1100,12 +998,21 @@ const proceedWithPayment = useCallback(async () => {
           </LinearGradient>
         </LinearGradient>
 
-        <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+        {/*
+          Wrap ScrollView + suggestions in a View with zIndex so the dropdown
+          floats above content below it without being clipped by ScrollView.
+        */}
+        <ScrollView
+          style={styles.container}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
           <View style={styles.content}>
+
+            {/* Info Banner */}
             <LinearGradient
               colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
+              start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
               style={styles.infoBanner}
             >
               <IconSymbol name="info" size={20} color={currentColors.primary} />
@@ -1114,186 +1021,149 @@ const proceedWithPayment = useCallback(async () => {
               </Text>
             </LinearGradient>
 
+            {/* Order Type */}
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Order Type</Text>
               <View style={styles.orderTypeSelector}>
+
                 <LinearGradient
-                  colors={orderType === 'delivery' 
+                  colors={orderType === 'delivery'
                     ? [currentColors.secondary, currentColors.highlight]
-                    : [currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]
-                  }
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 0 }}
-                  style={[
-                    styles.orderTypeButton,
-                    {
-                      borderColor: orderType === 'delivery' ? currentColors.secondary : currentColors.border,
-                    }
-                  ]}
+                    : [currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
+                  start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+                  style={[styles.orderTypeButton, { borderColor: orderType === 'delivery' ? currentColors.secondary : currentColors.border }]}
                 >
                   <Pressable
                     style={{ flexDirection: 'row', alignItems: 'center', gap: 8, padding: 4 }}
-                    onPress={() => {
-                      if (!processing) {
-                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                        setOrderType('delivery');
-                      }
-                    }}
+                    onPress={() => { if (!processing) { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setOrderType('delivery'); } }}
                     disabled={processing}
                   >
-                    <IconSymbol 
-                      name="scooter" 
-                      size={20} 
-                      color={orderType === 'delivery' ? currentColors.background : currentColors.text} 
-                    />
-                    <Text style={[
-                      styles.orderTypeText, 
-                      { color: orderType === 'delivery' ? currentColors.background : currentColors.text }
-                    ]}>
+                    <IconSymbol name="scooter" size={20} color={orderType === 'delivery' ? currentColors.background : currentColors.text} />
+                    <Text style={[styles.orderTypeText, { color: orderType === 'delivery' ? currentColors.background : currentColors.text }]}>
                       Delivery
                     </Text>
                   </Pressable>
                 </LinearGradient>
 
                 <LinearGradient
-                  colors={orderType === 'pickup' 
+                  colors={orderType === 'pickup'
                     ? [currentColors.secondary, currentColors.highlight]
-                    : [currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]
-                  }
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 0 }}
-                  style={[
-                    styles.orderTypeButton,
-                    {
-                      borderColor: orderType === 'pickup' ? currentColors.secondary : currentColors.border,
-                    }
-                  ]}
+                    : [currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
+                  start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+                  style={[styles.orderTypeButton, { borderColor: orderType === 'pickup' ? currentColors.secondary : currentColors.border }]}
                 >
                   <Pressable
                     style={{ flexDirection: 'row', alignItems: 'center', gap: 8, padding: 4 }}
-                    onPress={() => {
-                      if (!processing) {
-                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                        setOrderType('pickup');
-                      }
-                    }}
+                    onPress={() => { if (!processing) { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setOrderType('pickup'); } }}
                     disabled={processing}
                   >
-                    <IconSymbol 
-                      name="bag.fill" 
-                      size={20} 
-                      color={orderType === 'pickup' ? currentColors.background : currentColors.text} 
-                    />
-                    <Text style={[
-                      styles.orderTypeText, 
-                      { color: orderType === 'pickup' ? currentColors.background : currentColors.text }
-                    ]}>
+                    <IconSymbol name="bag.fill" size={20} color={orderType === 'pickup' ? currentColors.background : currentColors.text} />
+                    <Text style={[styles.orderTypeText, { color: orderType === 'pickup' ? currentColors.background : currentColors.text }]}>
                       Pickup
                     </Text>
                   </Pressable>
                 </LinearGradient>
+
               </View>
             </View>
 
+            {/* Delivery Address + Autocomplete + Quote */}
             {orderType === 'delivery' && (
-              <View style={styles.section}>
+              <View style={[styles.section, { zIndex: 100 }]}>
                 <Text style={styles.sectionTitle}>Delivery Address *</Text>
                 <View style={styles.inputContainer}>
                   <TextInput
+                    ref={addressInputRef}
                     style={[
                       styles.input,
                       styles.inputWithValidation,
-                      { 
-                        borderColor: addressTouched && addressValidation 
-                          ? getAddressValidationColor()
-                          : currentColors.border,
-                      }
+                      { borderColor: addressTouched && addressValidation ? getAddressValidationColor() : currentColors.border },
                     ]}
-                    placeholder="Enter your full delivery address (street, city, state, ZIP)"
+                    placeholder="Start typing your address..."
                     placeholderTextColor={currentColors.textSecondary}
                     value={deliveryAddress}
-                    onChangeText={(text) => {
-                      setDeliveryAddress(text);
-                      setAddressTouched(true);
+                    onChangeText={handleAddressChange}
+                    onFocus={() => {
+                      if (deliveryAddress.trim().length >= 3 && placeSuggestions.length > 0) {
+                        setShowSuggestions(true);
+                      }
                     }}
-                    multiline
-                    numberOfLines={3}
-                    textAlignVertical="top"
+                    onBlur={() => {
+                      // Delay hide so tap on suggestion registers first
+                      setTimeout(() => setShowSuggestions(false), 200);
+                    }}
+                    multiline={false}
+                    textAlignVertical="center"
                     editable={!processing}
+                    returnKeyType="done"
+                    onSubmitEditing={() => {
+                      setShowSuggestions(false);
+                      validateAddress(deliveryAddress);
+                    }}
                   />
-                  {addressTouched && (
-                    <View style={styles.validationIconContainer}>
-                      {isValidatingAddress ? (
-                        <ActivityIndicator size="small" color={currentColors.primary} />
-                      ) : (
-                        <IconSymbol 
-                          name={getAddressValidationIcon()} 
-                          size={24} 
-                          color={getAddressValidationColor()} 
-                        />
-                      )}
-                    </View>
-                  )}
+                  <View style={styles.validationIconContainer}>
+                    {isValidatingAddress || isFetchingSuggestions ? (
+                      <ActivityIndicator size="small" color={currentColors.primary} />
+                    ) : addressTouched && addressValidation ? (
+                      <IconSymbol name={getAddressValidationIcon()} size={24} color={getAddressValidationColor()} />
+                    ) : null}
+                  </View>
                 </View>
-                
-                {addressTouched && addressValidation && (
+
+                {/* Google Places dropdown */}
+                {renderPlacesSuggestions()}
+
+                {/* Validation message */}
+                {addressTouched && addressValidation && !showSuggestions && (
                   <View style={styles.validationMessage}>
-                    <Text style={[
-                      styles.validationMessageText, 
-                      { color: getAddressValidationColor() }
-                    ]}>
+                    <Text style={[styles.validationMessageText, { color: getAddressValidationColor() }]}>
                       {getAddressValidationMessage()}
                     </Text>
                   </View>
                 )}
 
-                {addressValidation?.isValid && 
-                 addressValidation.formattedAddress && 
-                 addressValidation.formattedAddress !== deliveryAddress && (
-                  <LinearGradient
-                    colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 1 }}
-                    style={styles.formattedAddressSuggestion}
-                  >
-                    <View style={styles.suggestionHeader}>
-                      <IconSymbol name="lightbulb" size={16} color={currentColors.primary} />
-                      <Text style={styles.suggestionTitle}>
-                        Suggested Address
-                      </Text>
-                    </View>
-                    <Text style={styles.suggestionAddress}>
-                      {addressValidation.formattedAddress}
-                    </Text>
+                {/* Formatted address suggestion (from verify-address edge function) */}
+                {!showSuggestions &&
+                  addressValidation?.isValid &&
+                  addressValidation.formattedAddress &&
+                  addressValidation.formattedAddress !== deliveryAddress && (
                     <LinearGradient
-                      colors={[currentColors.primary, currentColors.primary]}
-                      start={{ x: 0, y: 0 }}
-                      end={{ x: 1, y: 0 }}
-                      style={styles.useSuggestionButton}
+                      colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
+                      start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+                      style={styles.formattedAddressSuggestion}
                     >
-                      <Pressable
-                        style={styles.useSuggestionButtonInner}
-                        onPress={useFormattedAddress}
+                      <View style={styles.suggestionHeader}>
+                        <IconSymbol name="lightbulb" size={16} color={currentColors.primary} />
+                        <Text style={styles.suggestionTitle}>Suggested Address</Text>
+                      </View>
+                      <Text style={styles.suggestionAddress}>{addressValidation.formattedAddress}</Text>
+                      <LinearGradient
+                        colors={[currentColors.primary, currentColors.primary]}
+                        start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+                        style={styles.useSuggestionButton}
                       >
-                        <IconSymbol name="check" size={14} color={currentColors.background} />
-                        <Text style={styles.useSuggestionButtonText}>
-                          Use This Address
-                        </Text>
-                      </Pressable>
+                        <Pressable style={styles.useSuggestionButtonInner} onPress={useFormattedAddress}>
+                          <IconSymbol name="check" size={14} color={currentColors.background} />
+                          <Text style={styles.useSuggestionButtonText}>Use This Address</Text>
+                        </Pressable>
+                      </LinearGradient>
                     </LinearGradient>
-                  </LinearGradient>
-                )}
+                  )}
+
+                {/* Delivery quote — appears below address once fetched */}
+                {renderDeliveryQuoteCard()}
               </View>
             )}
 
+            {/* Notes */}
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>
                 {orderType === 'pickup' ? 'Pickup Notes (Optional)' : 'Delivery Notes (Optional)'}
               </Text>
               <TextInput
                 style={styles.input}
-                placeholder={orderType === 'pickup' 
-                  ? 'Add any special instructions for pickup...' 
+                placeholder={orderType === 'pickup'
+                  ? 'Add any special instructions for pickup...'
                   : 'Add any special instructions for delivery...'}
                 placeholderTextColor={currentColors.textSecondary}
                 value={pickupNotes}
@@ -1305,109 +1175,112 @@ const proceedWithPayment = useCallback(async () => {
               />
             </View>
 
-            {/* Payment Methods Info */}
+            {/* Payment Method */}
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Payment Method</Text>
-              
               <LinearGradient
                 colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
+                start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
                 style={styles.paymentMethodsInfo}
               >
                 <IconSymbol name="payment" size={24} color={currentColors.primary} />
                 <Text style={styles.paymentMethodsInfoText}>
-                  Choose from multiple payment options including saved cards, Apple Pay, Google Pay, and more when you proceed to checkout.
+                  Choose from saved cards, Apple Pay, Google Pay, and more when you proceed to checkout.
                 </Text>
               </LinearGradient>
             </View>
 
+            {/* Order Summary */}
             <LinearGradient
               colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
+              start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
               style={styles.summaryCard}
             >
               <Text style={styles.summaryTitle}>Order Summary</Text>
+
               <View style={styles.summaryRow}>
                 <Text style={styles.summaryLabel}>Subtotal</Text>
                 <Text style={styles.summaryValue}>${subtotal.toFixed(2)}</Text>
               </View>
               <View style={styles.summaryRow}>
-                <Text style={[styles.summaryLabel, { color: currentColors.secondary }]}>
-                  Discount (15%)
-                </Text>
-                <Text style={[styles.summaryValue, { color: currentColors.secondary }]}>
-                  -${discount.toFixed(2)}
-                </Text>
+                <Text style={[styles.summaryLabel, { color: currentColors.secondary }]}>Discount (15%)</Text>
+                <Text style={[styles.summaryValue, { color: currentColors.secondary }]}>-${discount.toFixed(2)}</Text>
               </View>
               <View style={styles.summaryRow}>
                 <Text style={styles.summaryLabel}>Tax (9.75%)</Text>
                 <Text style={styles.summaryValue}>${tax.toFixed(2)}</Text>
               </View>
-              {usePoints && pointsDiscount > 0 && (
+
+              {orderType === 'delivery' && (
                 <View style={styles.summaryRow}>
-                  <Text style={[styles.summaryLabel, { color: currentColors.secondary }]}>
-                    Points Discount
-                  </Text>
-                  <Text style={[styles.summaryValue, { color: currentColors.secondary }]}>
-                    -${pointsDiscount.toFixed(2)}
-                  </Text>
+                  <Text style={styles.summaryLabel}>Delivery fee</Text>
+                  {isFetchingQuote ? (
+                    <ActivityIndicator size="small" color={currentColors.primary} />
+                  ) : (
+                    <Text style={styles.summaryValue}>${deliveryFee.toFixed(2)}</Text>
+                  )}
                 </View>
               )}
+
+              {usePoints && pointsDiscount > 0 && (
+                <View style={styles.summaryRow}>
+                  <Text style={[styles.summaryLabel, { color: currentColors.secondary }]}>Points Discount</Text>
+                  <Text style={[styles.summaryValue, { color: currentColors.secondary }]}>-${pointsDiscount.toFixed(2)}</Text>
+                </View>
+              )}
+
               <View style={[styles.summaryRow, styles.summaryRowTotal]}>
                 <Text style={styles.summaryLabelTotal}>Total</Text>
                 <Text style={styles.summaryValueTotal}>${total.toFixed(2)}</Text>
               </View>
+
               <View style={styles.pointsEarnCard}>
                 <IconSymbol name="star" size={20} color={currentColors.highlight} />
                 <Text style={styles.pointsEarnText}>
-                  You&apos;ll earn {pointsToEarn} points with this order! (${(pointsToEarn * POINTS_TO_DOLLAR_RATE).toFixed(2)} value)
+                  You'll earn {pointsToEarn} points with this order! (${(pointsToEarn * POINTS_TO_DOLLAR_RATE).toFixed(2)} value)
                 </Text>
               </View>
             </LinearGradient>
+
           </View>
         </ScrollView>
 
+        {/* Footer */}
         <LinearGradient
           colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
+          start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
           style={styles.footer}
         >
           <LinearGradient
-            colors={processing 
+            colors={processing
               ? [currentColors.textSecondary, currentColors.textSecondary]
-              : [currentColors.secondary, currentColors.highlight]
-            }
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 0 }}
+              : [currentColors.secondary, currentColors.highlight]}
+            start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
             style={[styles.placeOrderButton, { opacity: processing ? 0.7 : 1 }]}
           >
-            <Pressable 
+            <Pressable
               style={styles.placeOrderButtonInner}
               onPress={handlePlaceOrder}
-              disabled={processing}
+              disabled={processing || isFetchingQuote}
             >
               {processing ? (
                 <>
                   <ActivityIndicator color={currentColors.background} />
-                  <Text style={styles.placeOrderButtonText}>
-                    Processing...
-                  </Text>
+                  <Text style={styles.placeOrderButtonText}>Processing...</Text>
                 </>
               ) : (
                 <>
                   <IconSymbol name="lock" size={20} color={currentColors.background} />
                   <Text style={styles.placeOrderButtonText}>
                     Pay ${total.toFixed(2)}
+                    {orderType === 'delivery' ? ' · incl. delivery' : ''}
                   </Text>
                 </>
               )}
             </Pressable>
           </LinearGradient>
         </LinearGradient>
-        
+
         <Toast
           visible={toastVisible}
           message={toastMessage}
@@ -1421,7 +1294,7 @@ const proceedWithPayment = useCallback(async () => {
 }
 
 // ============================================================================
-// MAIN COMPONENT WITH STRIPE PROVIDER
+// EXPORT
 // ============================================================================
 
 export default function CheckoutScreen() {
