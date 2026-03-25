@@ -1,5 +1,5 @@
 import { useApp } from '@/contexts/AppContext';
-import { useEffect } from 'react';
+import { useRef } from 'react';
 import type { CartItem } from '@/contexts/AppContext';
 import React, { useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -13,11 +13,16 @@ import {
   Image,
   Pressable,
   Platform,
+  Modal,
+  Animated,
+  Dimensions,
 } from 'react-native';
 import { IconSymbol } from '@/components/IconSymbol';
 import Dialog from '@/components/Dialog';
 import { LinearGradient } from 'expo-linear-gradient';
 import swallowImage from '@/assets/images/swallow.jpeg';
+
+const SCREEN_HEIGHT = Dimensions.get('window').height;
 
 export default function CartScreen() {
   const { cart, updateCartQuantity, removeFromCart, currentColors, menuItems, addToCart } = useApp();
@@ -26,16 +31,49 @@ export default function CartScreen() {
   const [dialogVisible, setDialogVisible] = useState(false);
   const [dialogType, setDialogType] = useState<'remove' | 'empty'>('remove');
   const [itemToRemove, setItemToRemove] = useState<string | null>(null);
+  const [swallowDrawerVisible, setSwallowDrawerVisible] = useState(false);
+  const [soupDrawerVisible, setSoupDrawerVisible] = useState(false);
+  const drawerAnim = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
+  const soupDrawerAnim = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
 
-  const soupCount = cart.filter(item =>
-    item.category?.toLowerCase().includes('soup')
-  ).length;
-
-  const swallowCount = cart.filter(item =>
+  const swallows = menuItems.filter(item =>
     item.category?.toLowerCase().includes('swallow')
-  ).length;
+  );
 
-  const showSwallowBadge = soupCount > 0 && swallowCount < soupCount;
+  const soups = menuItems.filter(item =>
+    item.category?.toLowerCase().includes('soup')
+  );
+
+  const openSwallowDrawer = () => {
+    setSwallowDrawerVisible(true);
+    Animated.spring(drawerAnim, { toValue: 0, useNativeDriver: true, bounciness: 4 }).start();
+  };
+
+  const closeSwallowDrawer = () => {
+    Animated.timing(drawerAnim, { toValue: SCREEN_HEIGHT, duration: 250, useNativeDriver: true }).start(() => setSwallowDrawerVisible(false));
+  };
+
+  const openSoupDrawer = () => {
+    setSoupDrawerVisible(true);
+    Animated.spring(soupDrawerAnim, { toValue: 0, useNativeDriver: true, bounciness: 4 }).start();
+  };
+
+  const closeSoupDrawer = () => {
+    Animated.timing(soupDrawerAnim, { toValue: SCREEN_HEIGHT, duration: 250, useNativeDriver: true }).start(() => setSoupDrawerVisible(false));
+  };
+
+  const soupQuantity = cart
+    .filter(item => item.category?.toLowerCase().includes('soup'))
+    .reduce((sum, item) => sum + item.quantity, 0);
+
+  const swallowQuantity = cart
+    .filter(item => item.category?.toLowerCase().includes('swallow'))
+    .reduce((sum, item) => sum + item.quantity, 0);
+
+  const showSwallowBadge = soupQuantity > 0 && swallowQuantity < soupQuantity;
+  const showSoupBadge = swallowQuantity > 0 && soupQuantity < swallowQuantity;
+
+  const firstCartSoupImage = cart.find(item => item.category?.toLowerCase().includes('soup'))?.image;
 
   const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const tax = subtotal * 0.0975;
@@ -167,11 +205,55 @@ export default function CartScreen() {
                         </Pressable>
                       </LinearGradient>
 
+                      {item.category?.toLowerCase().includes('swallow') && showSoupBadge && (
+                        <Pressable
+                          onPress={() => {
+                            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                            openSoupDrawer();
+                          }}
+                          style={{
+                            position: 'absolute',
+                            bottom: -18,
+                            right: 12,
+                            zIndex: 10,
+                          }}
+                        >
+                          <View
+                            style={{
+                              flexDirection: 'row',
+                              alignItems: 'center',
+                              gap: 8,
+                              paddingHorizontal: 10,
+                              paddingVertical: 6,
+                              borderRadius: 20,
+                              borderWidth: 1,
+                              borderColor: 'rgba(255,255,255,0.3)',
+                              backgroundColor: 'rgba(0,0,0,0.35)',
+                              overflow: 'hidden',
+                              elevation: 10,
+                            }}
+                          >
+                            {firstCartSoupImage ? (
+                              <Image
+                                source={{ uri: firstCartSoupImage }}
+                                style={{ width: 28, height: 28, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(255,255,255,0.4)' }}
+                              />
+                            ) : (
+                              <IconSymbol name="cup.and.saucer.fill" size={20} color="#FFFFFF" />
+                            )}
+                            <Text style={{ fontFamily: 'Cormorant_600SemiBold', fontSize: 13, color: '#FFFFFF', letterSpacing: 0.3 }}>
+                              Add a Soup
+                            </Text>
+                            <IconSymbol name="arrow.right" size={11} color="rgba(255,255,255,0.8)" />
+                          </View>
+                        </Pressable>
+                      )}
+
                       {item.category?.toLowerCase().includes('soup') && showSwallowBadge && (
                         <Pressable
                           onPress={() => {
                             Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                            router.push({ pathname: '/', params: { category: 'Swallows' } });
+                            openSwallowDrawer();
                           }}
                           style={{
                             position: 'absolute',
@@ -260,6 +342,88 @@ export default function CartScreen() {
             </>
           )}
         </View>
+        <Modal visible={swallowDrawerVisible} transparent animationType="none" onRequestClose={closeSwallowDrawer}>
+          <Pressable style={styles.drawerBackdrop} onPress={closeSwallowDrawer} />
+          <Animated.View style={[styles.drawer, { backgroundColor: currentColors.card, transform: [{ translateY: drawerAnim }] }]}>
+            <View style={[styles.drawerHandle, { backgroundColor: currentColors.border }]} />
+            <View style={styles.drawerHeader}>
+              <Image source={swallowImage} style={styles.drawerHeaderImage} />
+              <Text style={[styles.drawerTitle, { color: currentColors.text }]}>Add a Swallow</Text>
+              <Pressable onPress={closeSwallowDrawer} style={styles.drawerClose}>
+                <IconSymbol name="xmark" size={20} color={currentColors.textSecondary} />
+              </Pressable>
+            </View>
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.drawerList}>
+              {swallows.length === 0 ? (
+                <Text style={[styles.drawerEmpty, { color: currentColors.textSecondary }]}>No swallows available</Text>
+              ) : (
+                swallows.map(item => (
+                  <Pressable
+                    key={item.id}
+                    style={[styles.drawerItem, { borderColor: currentColors.border, backgroundColor: currentColors.background }]}
+                    onPress={() => {
+                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                      addToCart({ ...item, quantity: 1 });
+                      closeSwallowDrawer();
+                    }}
+                  >
+                    <Image source={{ uri: item.image }} style={styles.drawerItemImage} />
+                    <View style={styles.drawerItemInfo}>
+                      <Text style={[styles.drawerItemName, { color: currentColors.text }]}>{item.name}</Text>
+                      <Text style={[styles.drawerItemDesc, { color: currentColors.textSecondary }]} numberOfLines={1}>{item.description}</Text>
+                      <Text style={[styles.drawerItemPrice, { color: currentColors.secondary }]}>${item.price.toFixed(2)}</Text>
+                    </View>
+                    <IconSymbol name="plus.circle.fill" size={28} color={currentColors.secondary} />
+                  </Pressable>
+                ))
+              )}
+            </ScrollView>
+          </Animated.View>
+        </Modal>
+
+        <Modal visible={soupDrawerVisible} transparent animationType="none" onRequestClose={closeSoupDrawer}>
+          <Pressable style={styles.drawerBackdrop} onPress={closeSoupDrawer} />
+          <Animated.View style={[styles.drawer, { backgroundColor: currentColors.card, transform: [{ translateY: soupDrawerAnim }] }]}>
+            <View style={[styles.drawerHandle, { backgroundColor: currentColors.border }]} />
+            <View style={styles.drawerHeader}>
+              {firstCartSoupImage ? (
+                <Image source={{ uri: firstCartSoupImage }} style={styles.drawerHeaderImage} />
+              ) : (
+                <IconSymbol name="cup.and.saucer.fill" size={28} color={currentColors.secondary} />
+              )}
+              <Text style={[styles.drawerTitle, { color: currentColors.text }]}>Add a Soup</Text>
+              <Pressable onPress={closeSoupDrawer} style={styles.drawerClose}>
+                <IconSymbol name="xmark" size={20} color={currentColors.textSecondary} />
+              </Pressable>
+            </View>
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.drawerList}>
+              {soups.length === 0 ? (
+                <Text style={[styles.drawerEmpty, { color: currentColors.textSecondary }]}>No soups available</Text>
+              ) : (
+                soups.map(item => (
+                  <Pressable
+                    key={item.id}
+                    style={[styles.drawerItem, { borderColor: currentColors.border, backgroundColor: currentColors.background }]}
+                    onPress={() => {
+                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                      addToCart({ ...item, quantity: 1 });
+                      closeSoupDrawer();
+                    }}
+                  >
+                    <Image source={{ uri: item.image }} style={styles.drawerItemImage} />
+                    <View style={styles.drawerItemInfo}>
+                      <Text style={[styles.drawerItemName, { color: currentColors.text }]}>{item.name}</Text>
+                      <Text style={[styles.drawerItemDesc, { color: currentColors.textSecondary }]} numberOfLines={1}>{item.description}</Text>
+                      <Text style={[styles.drawerItemPrice, { color: currentColors.secondary }]}>${item.price.toFixed(2)}</Text>
+                    </View>
+                    <IconSymbol name="plus.circle.fill" size={28} color={currentColors.secondary} />
+                  </Pressable>
+                ))
+              )}
+            </ScrollView>
+          </Animated.View>
+        </Modal>
+
         <Dialog
           visible={dialogVisible}
           title={dialogType === 'remove' ? 'Remove Item' : 'Empty Cart'}
@@ -345,4 +509,86 @@ const styles = StyleSheet.create({
   checkoutButton: { borderRadius: 0, marginTop: 20, boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.5)', elevation: 10 },
   checkoutButtonInner: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', paddingVertical: 16, gap: 8 },
   checkoutButtonText: { fontSize: 16, fontFamily: 'Cormorant_700Bold' },
+  drawerBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  drawer: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: SCREEN_HEIGHT * 0.7,
+    paddingBottom: 40,
+  },
+  drawerHandle: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginTop: 12,
+    marginBottom: 8,
+  },
+  drawerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    gap: 10,
+  },
+  drawerHeaderImage: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+  },
+  drawerTitle: {
+    flex: 1,
+    fontSize: 20,
+    fontFamily: 'PlayfairDisplay_700Bold',
+  },
+  drawerClose: {
+    padding: 4,
+  },
+  drawerList: {
+    paddingHorizontal: 16,
+    paddingBottom: 16,
+    gap: 12,
+  },
+  drawerEmpty: {
+    textAlign: 'center',
+    fontFamily: 'Cormorant_400Regular',
+    fontSize: 16,
+    marginTop: 20,
+  },
+  drawerItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 12,
+  },
+  drawerItemImage: {
+    width: 64,
+    height: 64,
+    borderRadius: 8,
+  },
+  drawerItemInfo: {
+    flex: 1,
+    gap: 2,
+  },
+  drawerItemName: {
+    fontSize: 15,
+    fontFamily: 'PlayfairDisplay_700Bold',
+  },
+  drawerItemDesc: {
+    fontSize: 13,
+    fontFamily: 'Cormorant_400Regular',
+  },
+  drawerItemPrice: {
+    fontSize: 15,
+    fontFamily: 'Cormorant_700Bold',
+  },
 });

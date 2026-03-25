@@ -124,6 +124,12 @@ export default function HomeScreen() {
     return matchesSearch && matchesCategory;
   });
 
+  // Group items by category (preserving menuCategories order)
+  const groupedItems = menuCategories
+    .filter(cat => cat !== "All")
+    .map(cat => ({ category: cat, items: filteredItems.filter(i => i.category === cat) }))
+    .filter(group => group.items.length > 0);
+
   const handleCategoryPress = (category: string) => {
     console.log("Category selected:", category);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -186,6 +192,56 @@ export default function HomeScreen() {
       setRefreshing(false);
     }
   };
+
+  const renderMenuItem = (item: any) => (
+    <Pressable
+      key={item.id}
+      style={styles.menuItem}
+      onPress={() => handleItemPress(item.id)}
+    >
+      <View style={styles.imageContainer}>
+        <Image
+          source={{ uri: item.image }}
+          style={styles.menuItemImage}
+        />
+      </View>
+      <View style={styles.menuItemInfoWrapper}>
+        <View style={styles.textureOverlay} />
+        <LinearGradient
+          colors={[
+            'rgba(25, 20, 15, 0.98)',
+            'rgba(35, 28, 18, 0.98)',
+            'rgba(45, 35, 20, 0.98)',
+            'rgba(60, 45, 25, 0.98)',
+            'rgba(75, 55, 30, 0.98)',
+            'rgba(90, 65, 35, 0.98)',
+            'rgba(110, 80, 40, 0.98)',
+            'rgba(130, 95, 45, 0.98)',
+            'rgba(150, 110, 50, 0.98)',
+          ]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+          style={styles.menuItemInfo}
+        >
+          <Text style={styles.menuItemName}>{item.name}</Text>
+          <Text style={styles.menuItemDescription} numberOfLines={3}>{item.description}</Text>
+          <View style={styles.menuItemFooter}>
+            <Text style={styles.menuItemPrice}>${item.price.toFixed(2)}</Text>
+            <Pressable
+              style={[styles.addButton, isMonday && styles.addButtonDisabled]}
+              onPress={(e) => { e.stopPropagation(); handleAddToCart(item); }}
+            >
+              <IconSymbol
+                name={Platform.OS === 'ios' ? "plus" : "add"}
+                size={20}
+                color={isMonday ? '#666666' : '#5FE8D0'}
+              />
+            </Pressable>
+          </View>
+        </LinearGradient>
+      </View>
+    </Pressable>
+  );
 
   return (
     <LinearGradient
@@ -477,72 +533,19 @@ export default function HomeScreen() {
                   {searchQuery ? 'No items match your search' : 'No items in this category'}
                 </Text>
               </View>
-            ) : (
-              filteredItems.map((item) => (
-                <Pressable
-                  key={item.id}
-                  style={styles.menuItem}
-                  onPress={() => handleItemPress(item.id)}
-                >
-                  <View style={styles.imageContainer}>
-                    <Image
-                      source={{ uri: item.image }}
-                      style={styles.menuItemImage}
-                    />
+            ) : selectedCategory === "All" ? (
+              groupedItems.map(group => (
+                <View key={group.category}>
+                  <View style={styles.categoryHeader}>
+                    <View style={styles.categoryHeaderLine} />
+                    <Text style={styles.categoryHeaderText}>{group.category}</Text>
+                    <View style={styles.categoryHeaderLine} />
                   </View>
-                  <View style={styles.menuItemInfoWrapper}>
-                    {/* Texture overlay */}
-                    <View style={styles.textureOverlay} />
-                    <LinearGradient
-                      colors={[
-                        'rgba(25, 20, 15, 0.98)',
-                        'rgba(35, 28, 18, 0.98)',
-                        'rgba(45, 35, 20, 0.98)',
-                        'rgba(60, 45, 25, 0.98)',
-                        'rgba(75, 55, 30, 0.98)',
-                        'rgba(90, 65, 35, 0.98)',
-                        'rgba(110, 80, 40, 0.98)',
-                        'rgba(130, 95, 45, 0.98)',
-                        'rgba(150, 110, 50, 0.98)',
-                      ]}
-                      start={{ x: 0, y: 0 }}
-                      end={{ x: 1, y: 0 }}
-                      style={styles.menuItemInfo}
-                    >
-                      <Text style={styles.menuItemName}>
-                        {item.name}
-                      </Text>
-                      <Text
-                        style={styles.menuItemDescription}
-                        numberOfLines={3}
-                      >
-                        {item.description}
-                      </Text>
-                      <View style={styles.menuItemFooter}>
-                        <Text style={styles.menuItemPrice}>
-                          ${item.price.toFixed(2)}
-                        </Text>
-                        <Pressable
-                          style={[
-                            styles.addButton,
-                            isMonday && styles.addButtonDisabled,
-                          ]}
-                          onPress={(e) => {
-                            e.stopPropagation();
-                            handleAddToCart(item);
-                          }}
-                        >
-                          <IconSymbol
-                            name={Platform.OS === 'ios' ? "plus" : "add"}
-                            size={20}
-                            color={isMonday ? '#666666' : '#5FE8D0'}
-                          />
-                        </Pressable>
-                      </View>
-                    </LinearGradient>
-                  </View>
-                </Pressable>
+                  {group.items.map(item => renderMenuItem(item))}
+                </View>
               ))
+            ) : (
+              filteredItems.map(item => renderMenuItem(item))
             )}
           </View>
         )}
@@ -881,6 +884,25 @@ const styles = StyleSheet.create({
   addButtonDisabled: {
     borderColor: '#444444',
     opacity: 0.5,
+  },
+  categoryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 24,
+    marginBottom: 16,
+    gap: 12,
+  },
+  categoryHeaderLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: '#d4af3765',
+  },
+  categoryHeaderText: {
+    fontSize: 13,
+    fontFamily: 'LibertinusSans_700Bold',
+    color: '#D4AF37',
+    letterSpacing: 2,
+    textTransform: 'uppercase',
   },
   categoriesWrapper: {
     position: 'relative',

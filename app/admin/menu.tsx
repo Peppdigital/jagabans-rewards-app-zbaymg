@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import {
   View,
   Text,
@@ -54,6 +54,28 @@ export default function AdminMenuManagement() {
   const [toastMessage, setToastMessage] = useState('');
   const [toastType, setToastType] = useState<'success' | 'error' | 'info'>('success');
   const [uploadingImage, setUploadingImage] = useState(false);
+
+  const scrollViewRef = useRef<ScrollView>(null);
+  const editFormRef = useRef<View>(null);
+  const itemYPositions = useRef<{ [key: string]: number }>({});
+  const itemsContainerY = useRef(0);
+  
+  // useEffect(() => {
+  //   if (editingItemId) {
+  //     setTimeout(() => {
+  //       const scrollNode = findNodeHandle(scrollViewRef.current);
+  //       if (editFormRef.current && scrollNode) {
+  //         editFormRef.current.measureLayout(
+  //           scrollNode,
+  //           (_x, y) => {
+  //             scrollViewRef.current?.scrollTo({ y: Math.max(0, y - 16), animated: true });
+  //           },
+  //           () => {}
+  //         );
+  //       }
+  //     }, 50);
+  //   }
+  // }, [editingItemId]);
 
   const showDialog = (title: string, message: string, buttons: Array<{ text: string; onPress: () => void; style?: 'default' | 'destructive' | 'cancel' }>) => {
     setDialogConfig({ title, message, buttons });
@@ -197,21 +219,27 @@ export default function AdminMenuManagement() {
   };
 
   const handleEditItem = (item: MenuItem) => {
-    console.log("Editing menu item:", item.id);
-    if (Platform.OS !== "web") {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    }
+  if (Platform.OS !== "web") {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  }
+  setEditingItemId(item.id);
+  setFormData({
+    name: item.name,
+    description: item.description,
+    price: item.price.toString(),
+    category: item.category,
+    image: item.image,
+    available: item.available ?? true,
+  });
 
-    setEditingItemId(item.id);
-    setFormData({
-      name: item.name,
-      description: item.description,
-      price: item.price.toString(),
-      category: item.category,
-      image: item.image,
-      available: item.available ?? true,
-    });
-  };
+  // Scroll so the top of the card aligns with the top of the screen
+  setTimeout(() => {
+    const yPos = itemYPositions.current[item.id];
+    if (yPos !== undefined && scrollViewRef.current) {
+      scrollViewRef.current.scrollTo({ y: itemsContainerY.current + yPos, animated: true });
+    }
+  }, 100);
+};
 
   const resetForm = () => {
     setFormData({
@@ -224,10 +252,11 @@ export default function AdminMenuManagement() {
     });
   };
 
-  const filteredItems =
+  const filteredItems = (
     selectedCategory === "All"
       ? items
-      : items.filter((item) => item.category === selectedCategory);
+      : items.filter((item) => item.category === selectedCategory)
+  ).slice().sort((a, b) => Number(a.available ?? true) - Number(b.available ?? true));
 
   React.useEffect(() => {
     (async () => {
@@ -253,7 +282,7 @@ export default function AdminMenuManagement() {
   }, []);
 
   const renderEditForm = (itemId?: string) => (
-    <View style={styles.formContainer}>
+    <View ref={itemId ? editFormRef : undefined} style={styles.formContainer}>
       <Text style={styles.formTitle}>
         {itemId ? "Edit Menu Item" : "Add New Menu Item"}
       </Text>
@@ -446,6 +475,7 @@ export default function AdminMenuManagement() {
       </View>
 
       <ScrollView
+        ref={scrollViewRef}
         style={styles.scrollView}
         showsVerticalScrollIndicator={false}
       >
@@ -483,10 +513,12 @@ export default function AdminMenuManagement() {
           ))}
         </ScrollView>
 
-        <View style={styles.itemsContainer}>
+        <View style={styles.itemsContainer} onLayout={(e) => { itemsContainerY.current = e.nativeEvent.layout.y; }}>
           {filteredItems.map((item) => (
             <React.Fragment key={item.id}>
-              <View style={styles.menuItemWrapper}>
+              <View style={styles.menuItemWrapper} onLayout={(e) => {
+                itemYPositions.current[item.id] = e.nativeEvent.layout.y;
+              }}>
                 <View style={styles.menuItem}>
                   <Image source={{ uri: item.image }} style={styles.itemImage} />
                   <View style={styles.itemContent}>
@@ -502,9 +534,16 @@ export default function AdminMenuManagement() {
                   <View style={styles.itemActions}>
                     <Pressable
                       style={styles.actionButton}
-                      onPress={() => handleEditItem(item)}
+                      onPress={() => {
+                        if (editingItemId === item.id) {
+                          setEditingItemId(null);
+                          resetForm();
+                        } else {
+                          handleEditItem(item);
+                        }
+                      }}
                     >
-                      <IconSymbol name="pencil" size={20} color={colors.primary} />
+                      <IconSymbol name={editingItemId === item.id ? "xmark" : "pencil"} size={20} color={colors.primary} />
                     </Pressable>
                     <Pressable
                       style={styles.actionButton}
