@@ -385,11 +385,7 @@ export default function CartScreen() {
           <Animated.View style={[styles.drawer, { backgroundColor: currentColors.card, transform: [{ translateY: soupDrawerAnim }] }]}>
             <View style={[styles.drawerHandle, { backgroundColor: currentColors.border }]} />
             <View style={styles.drawerHeader}>
-              {firstCartSoupImage ? (
-                <Image source={{ uri: firstCartSoupImage }} style={styles.drawerHeaderImage} />
-              ) : (
-                <IconSymbol name="cup.and.saucer.fill" size={28} color={currentColors.secondary} />
-              )}
+                <Image source={ soupImage } style={styles.drawerHeaderImage} />
               <Text style={[styles.drawerTitle, { color: currentColors.text }]}>Add a Soup</Text>
               <Pressable onPress={closeSoupDrawer} style={styles.drawerClose}>
                 <IconSymbol name="xmark" size={20} color={currentColors.textSecondary} />
