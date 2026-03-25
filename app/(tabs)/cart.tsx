@@ -21,6 +21,7 @@ import { IconSymbol } from '@/components/IconSymbol';
 import Dialog from '@/components/Dialog';
 import { LinearGradient } from 'expo-linear-gradient';
 import swallowImage from '@/assets/images/swallow.jpeg';
+import soupImage from '@/assets/images/soup.jpg';
 
 const SCREEN_HEIGHT = Dimensions.get('window').height;
 
@@ -73,7 +74,7 @@ export default function CartScreen() {
   const showSwallowBadge = soupQuantity > 0 && swallowQuantity < soupQuantity;
   const showSoupBadge = swallowQuantity > 0 && soupQuantity < swallowQuantity;
 
-  const firstCartSoupImage = cart.find(item => item.category?.toLowerCase().includes('soup'))?.image;
+  // const firstCartSoupImage = cart.find(item => item.category?.toLowerCase().includes('soup'))?.image;
 
   const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const tax = subtotal * 0.0975;
@@ -233,14 +234,12 @@ export default function CartScreen() {
                               elevation: 10,
                             }}
                           >
-                            {firstCartSoupImage ? (
+                            
                               <Image
-                                source={{ uri: firstCartSoupImage }}
+                                source={ soupImage }
                                 style={{ width: 28, height: 28, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(255,255,255,0.4)' }}
                               />
-                            ) : (
-                              <IconSymbol name="cup.and.saucer.fill" size={20} color="#FFFFFF" />
-                            )}
+
                             <Text style={{ fontFamily: 'Cormorant_600SemiBold', fontSize: 13, color: '#FFFFFF', letterSpacing: 0.3 }}>
                               Add a Soup
                             </Text>
