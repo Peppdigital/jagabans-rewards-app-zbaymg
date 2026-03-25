@@ -56,6 +56,12 @@ interface DeliveryQuote {
   expires: string;
 }
 
+interface OutsideRadiusError {
+  distanceMiles: number;
+  radiusMiles: number;
+  message: string;
+}
+
 // ── Google Places types ────────────────────────────────────────────────────
 
 interface PlacesPrediction {
@@ -122,7 +128,7 @@ const POINTS_TO_DOLLAR_RATE = 0.01;
 const DISCOUNT_PERCENTAGE = 0.15;
 const POINTS_REWARD_PERCENTAGE = 0.05;
 const QUOTE_REFRESH_BUFFER_MS = 60_000;
-const FALLBACK_DELIVERY_FEE = 12.99; // applied when Uber quote is unavailable
+const FALLBACK_DELIVERY_FEE = 19.99; // applied when Uber quote is unavailable
 
 // ============================================================================
 // CHECKOUT CONTENT
@@ -169,6 +175,7 @@ function CheckoutContent() {
   const [deliveryQuote, setDeliveryQuote] = useState<DeliveryQuote | null>(null);
   const [isFetchingQuote, setIsFetchingQuote] = useState(false);
   const [quoteError, setQuoteError] = useState<string | null>(null);
+  const [outsideRadiusError, setOutsideRadiusError] = useState<OutsideRadiusError | null>(null);
 
   // Toast
   const [toastVisible, setToastVisible] = useState(false);
@@ -260,7 +267,6 @@ function CheckoutContent() {
       url.searchParams.set('input', input);
       url.searchParams.set('key', GOOGLE_PLACES_API_KEY);
       url.searchParams.set('types', 'address');
-      // Bias toward US addresses — adjust or remove as needed
       url.searchParams.set('components', 'country:us');
 
       const response = await fetch(url.toString());
@@ -296,7 +302,6 @@ function CheckoutContent() {
 
     let chosenAddress = prediction.description;
 
-    // Optionally enrich with Place Details for a cleaner formatted_address
     if (GOOGLE_PLACES_API_KEY) {
       try {
         const url = new URL('https://maps.googleapis.com/maps/api/place/details/json');
@@ -319,10 +324,11 @@ function CheckoutContent() {
     setValidatedAddress(chosenAddress);
     setAddressTouched(true);
 
-    // Clear stale quote / validation so they re-run against the new address
+    // Clear stale quote / validation / radius error so they re-run against the new address
     setDeliveryQuote(null);
     setQuoteError(null);
     setAddressValidation(null);
+    setOutsideRadiusError(null);
 
     // Trigger validation right away for the chosen address
     validateAddress(chosenAddress);
@@ -337,6 +343,7 @@ function CheckoutContent() {
     // Reset stale state
     setDeliveryQuote(null);
     setQuoteError(null);
+    setOutsideRadiusError(null);
 
     if (placesDebounceRef.current) clearTimeout(placesDebounceRef.current);
 
@@ -370,7 +377,6 @@ function CheckoutContent() {
       const response = await fetch(`${SUPABASE_URL}/functions/v1/verify-address`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-        // Pass apt separately so the edge function can put it in street_address[1]
         body: JSON.stringify({ address, apt }),
       });
 
@@ -382,7 +388,6 @@ function CheckoutContent() {
           setValidatedAddress(result.formattedAddress);
         }
         if (result.uberAddress) {
-          // Store the Uber Direct-formatted JSON string for use in quote + payment
           setValidatedUberAddress(result.uberAddress);
         }
       }
@@ -408,6 +413,7 @@ function CheckoutContent() {
   const fetchDeliveryQuote = useCallback(async (address: string, uberAddress?: string) => {
     setIsFetchingQuote(true);
     setQuoteError(null);
+    setOutsideRadiusError(null);
     try {
       const { data: { session }, error: sessionError } = await supabase.auth.getSession();
       console.log('[checkout] session token:', session?.access_token?.slice(0, 20), '| error:', sessionError);
@@ -415,13 +421,24 @@ function CheckoutContent() {
       const response = await fetch(`${SUPABASE_URL}/functions/v1/get-delivery-quote`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token}` },
-        // Prefer the Uber Direct-formatted JSON string; fall back to plain text
         body: JSON.stringify({ dropoffAddress: uberAddress || address }),
       });
 
       const result = await response.json();
 
       if (!result.success) {
+        // ── Outside delivery radius — surface a specific, actionable error ──
+        if (result.outsideRadius) {
+          setOutsideRadiusError({
+            distanceMiles: result.distanceMiles,
+            radiusMiles:   result.radiusMiles,
+            message:       result.error,
+          });
+          setDeliveryQuote(null);
+          setQuoteError(null);
+          return;
+        }
+
         setQuoteError(result.error ?? 'Delivery fee unavailable');
         setDeliveryQuote(null);
         return;
@@ -429,6 +446,7 @@ function CheckoutContent() {
 
       setDeliveryQuote(result as DeliveryQuote);
       setQuoteError(null);
+      setOutsideRadiusError(null);
     } catch (err) {
       setQuoteError('Could not fetch delivery fee');
       setDeliveryQuote(null);
@@ -453,6 +471,7 @@ function CheckoutContent() {
     if (orderType !== 'delivery') {
       setDeliveryQuote(null);
       setQuoteError(null);
+      setOutsideRadiusError(null);
     }
   }, [orderType]);
 
@@ -472,7 +491,7 @@ function CheckoutContent() {
   // Debounced address validation (for manual typing — skipped when a suggestion was just selected)
   useEffect(() => {
     if (orderType !== 'delivery' || !addressTouched || !deliveryAddress.trim()) return;
-    if (suggestionSelected) return; // already triggered in handleSelectSuggestion
+    if (suggestionSelected) return;
     const id = setTimeout(() => validateAddress(deliveryAddress), 1000);
     return () => clearTimeout(id);
   }, [deliveryAddress, addressTouched, orderType, validateAddress, suggestionSelected]);
@@ -534,9 +553,7 @@ function CheckoutContent() {
         metadata: {
           user_id: user.id,
           order_type: orderType,
-          // Human-readable address for receipts/display
           delivery_address: orderType === 'delivery' ? (validatedAddress || deliveryAddress) : '',
-          // Uber Direct-formatted JSON string — used by stripe-webhook to call create-delivery
           delivery_address_uber: orderType === 'delivery' ? (validatedUberAddress || '') : '',
           pickup_notes: pickupNotes || '',
           items: JSON.stringify(orderItems),
@@ -650,6 +667,16 @@ function CheckoutContent() {
         return;
       }
 
+      // Hard block — address is confirmed outside delivery radius
+      if (outsideRadiusError) {
+        Alert.alert(
+          'Outside Delivery Area',
+          `We currently deliver within ${outsideRadiusError.radiusMiles} miles of our restaurant. Your address is ${outsideRadiusError.distanceMiles} miles away.\n\nPlease select a closer address or choose pickup.`,
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+
       if (addressTouched && addressValidation) {
         if (!addressValidation.isValid) {
           Alert.alert(
@@ -671,12 +698,10 @@ function CheckoutContent() {
           return;
         }
       }
-
-      // No Uber quote → fallback fee ($12.99) is already included in total, proceed normally
     }
 
     await proceedWithPayment();
-  }, [orderType, deliveryAddress, addressTouched, addressValidation, proceedWithPayment]);
+  }, [orderType, deliveryAddress, addressTouched, addressValidation, outsideRadiusError, showToast, proceedWithPayment]);
 
   // ── Styles ────────────────────────────────────────────────────────────────
 
@@ -917,6 +942,30 @@ function CheckoutContent() {
       );
     }
 
+    // ── Outside radius — prominent error card ──────────────────────────────
+    if (outsideRadiusError) {
+      return (
+        <LinearGradient
+          colors={['#FFF5F5', '#FFF0F0']}
+          start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+          style={[styles.quoteCard, { borderColor: '#EF4444', borderWidth: 2 }]}
+        >
+          <IconSymbol name="location-off" size={22} color="#EF4444" />
+          <View style={styles.quoteCardText}>
+            <Text style={[styles.quoteCardFee, { color: '#EF4444' }]}>
+              Outside delivery area
+            </Text>
+            <Text style={[styles.quoteCardMeta, { color: '#EF4444' }]}>
+              Your address is {outsideRadiusError.distanceMiles} mi away · limit is {outsideRadiusError.radiusMiles} mi
+            </Text>
+            <Text style={[styles.quoteExpiry, { color: currentColors.textSecondary, marginTop: 4 }]}>
+              Please enter a closer address or switch to pickup.
+            </Text>
+          </View>
+        </LinearGradient>
+      );
+    }
+
     if (quoteError || (!isFetchingQuote && !deliveryQuote)) {
       // No Uber quote available — show flat fallback fee
       return (
@@ -998,10 +1047,6 @@ function CheckoutContent() {
           </LinearGradient>
         </LinearGradient>
 
-        {/*
-          Wrap ScrollView + suggestions in a View with zIndex so the dropdown
-          floats above content below it without being clipped by ScrollView.
-        */}
         <ScrollView
           style={styles.container}
           showsVerticalScrollIndicator={false}
@@ -1089,7 +1134,6 @@ function CheckoutContent() {
                       }
                     }}
                     onBlur={() => {
-                      // Delay hide so tap on suggestion registers first
                       setTimeout(() => setShowSuggestions(false), 200);
                     }}
                     multiline={false}
@@ -1252,16 +1296,16 @@ function CheckoutContent() {
           style={styles.footer}
         >
           <LinearGradient
-            colors={processing
+            colors={processing || outsideRadiusError || (orderType === 'delivery' && !deliveryAddress.trim())
               ? [currentColors.textSecondary, currentColors.textSecondary]
               : [currentColors.secondary, currentColors.highlight]}
             start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
-            style={[styles.placeOrderButton, { opacity: processing ? 0.7 : 1 }]}
+            style={[styles.placeOrderButton, { opacity: processing || outsideRadiusError || (orderType === 'delivery' && !deliveryAddress.trim()) ? 0.5 : 1 }]}
           >
             <Pressable
               style={styles.placeOrderButtonInner}
               onPress={handlePlaceOrder}
-              disabled={processing || isFetchingQuote}
+              disabled={processing || isFetchingQuote || !!outsideRadiusError || (orderType === 'delivery' && !deliveryAddress.trim())}
             >
               {processing ? (
                 <>
