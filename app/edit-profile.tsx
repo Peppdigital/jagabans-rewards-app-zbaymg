@@ -27,7 +27,7 @@ import { supabase, SUPABASE_URL } from './integrations/supabase/client';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const GOOGLE_PLACES_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_PLACES_API_KEY || 'AIzaSyAD8zYhfNdoR6DEv5E1Dbbr0dyI7fMAJ3Q';
+const GOOGLE_PLACES_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_PLACES_API_KEY || '';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

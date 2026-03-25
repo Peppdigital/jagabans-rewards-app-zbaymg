@@ -119,10 +119,10 @@ interface Order {
 
 const STRIPE_PUBLISHABLE_KEY =
   process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY ||
-  'pk_live_51SaVNBEpxgw216dfngaO9r3erOFV7XFC4zvvwMd97HuPpWpvCy26sCwWITZHhmtAv6iZLT35RGITrIxBoTF1v9AI007NGoktyP';
+  '';
 
 // Replace with your actual Google Places API key
-const GOOGLE_PLACES_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_PLACES_API_KEY || 'AIzaSyAD8zYhfNdoR6DEv5E1Dbbr0dyI7fMAJ3Q';
+const GOOGLE_PLACES_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_PLACES_API_KEY || '';
 
 const POINTS_TO_DOLLAR_RATE = 0.01;
 const DISCOUNT_PERCENTAGE = 0.15;
