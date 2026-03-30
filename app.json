@@ -1,12 +1,11 @@
 {
   "expo": {
-    "name": "Ooosum Foods LLC",
-    "slug": "ooosum-foods-llc",
-    "version": "1.5.1",
+    "name": "Jagabans L.A.",
+    "slug": "jagabansla",
+    "version": "1.5.10",
     "orientation": "portrait",
     "icon": "./assets/images/jagabans-circle.png",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
     "splash": {
       "image": "./assets/images/jagabans-circle.png",
       "resizeMode": "contain",
@@ -24,7 +23,6 @@
         "foregroundImage": "./assets/images/jagabans-circle.png",
         "backgroundColor": "#FFFFFF"
       },
-      "edgeToEdgeEnabled": true,
       "package": "com.ooosumfoods.jagabansla"
     },
     "web": {
@@ -34,7 +32,9 @@
     "plugins": [
       "expo-font",
       "expo-router",
-      "expo-web-browser"
+      "expo-web-browser",
+      "expo-build-properties",
+      "expo-sharing"
     ],
     "scheme": "jagabansla",
     "experiments": {

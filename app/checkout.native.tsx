@@ -459,13 +459,13 @@ function CheckoutContent() {
   useEffect(() => {
     if (
       orderType === 'delivery' &&
-      addressValidation?.isValid &&
-      addressValidation.confidence !== 'low'
+      addressValidation?.isValid 
+      // && addressValidation.confidence !== 'low'
     ) {
       const addr = validatedAddress || deliveryAddress;
       if (addr) fetchDeliveryQuote(addr, validatedUberAddress || undefined);
     }
-  }, [addressValidation?.isValid, addressValidation?.confidence, orderType]);
+  }, [addressValidation?.isValid, orderType]);
 
   useEffect(() => {
     if (orderType !== 'delivery') {
@@ -517,7 +517,7 @@ function CheckoutContent() {
       .from('user_profiles')
       .select('stripe_customer_id')
       .eq('user_id', user.id)
-      .single();
+      .single<{ stripe_customer_id: string | null }>();
 
     let customerId = customerData?.stripe_customer_id;
 
@@ -577,7 +577,7 @@ function CheckoutContent() {
     if (!response.ok) throw new Error('Failed to create payment intent');
     return response.json();
   }, [
-    total, orderType, cart, userProfile, validatedAddress, deliveryAddress, pickupNotes,
+    total, orderType, cart, userProfile, validatedAddress, deliveryAddress, validatedUberAddress, pickupNotes,
     subtotal, tax, discount, deliveryFee, pointsToEarn, usePoints, pointsDiscount,
     deliveryQuote, isQuoteExpired, fetchDeliveryQuote,
   ]);

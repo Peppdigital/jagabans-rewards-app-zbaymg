@@ -1,4 +1,6 @@
 import { useApp } from '@/contexts/AppContext';
+import { useAuth } from '@/contexts/AuthContext';
+import { getOrderingStatus } from '@/utils/mondayBlock';
 import { useRef } from 'react';
 import type { CartItem } from '@/contexts/AppContext';
 import React, { useState } from 'react';
@@ -27,10 +29,12 @@ const SCREEN_HEIGHT = Dimensions.get('window').height;
 
 export default function CartScreen() {
   const { cart, updateCartQuantity, removeFromCart, currentColors, menuItems, addToCart } = useApp();
+  const { isAuthenticated } = useAuth();
   const router = useRouter();
 
   const [dialogVisible, setDialogVisible] = useState(false);
-  const [dialogType, setDialogType] = useState<'remove' | 'empty'>('remove');
+  const [dialogType, setDialogType] = useState<'remove' | 'empty' | 'login' | 'closed'>('remove');
+  const [closedMessage, setClosedMessage] = useState('');
   const [itemToRemove, setItemToRemove] = useState<string | null>(null);
   const [swallowDrawerVisible, setSwallowDrawerVisible] = useState(false);
   const [soupDrawerVisible, setSoupDrawerVisible] = useState(false);
@@ -42,7 +46,7 @@ export default function CartScreen() {
   );
 
   const soups = menuItems.filter(item =>
-    item.category?.toLowerCase().includes('soup')
+    item.category?.toLowerCase().includes('soup combo')
   );
 
   const openSwallowDrawer = () => {
@@ -104,6 +108,18 @@ export default function CartScreen() {
 
   const handleCheckout = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    if (!isAuthenticated) {
+      setDialogType('login');
+      setDialogVisible(true);
+      return;
+    }
+    const orderingStatus = getOrderingStatus();
+    if (!orderingStatus.isOpen) {
+      setDialogType('closed');
+      setClosedMessage(orderingStatus.message);
+      setDialogVisible(true);
+      return;
+    }
     if (cart.length === 0) {
       setDialogType('empty');
       setDialogVisible(true);
@@ -206,7 +222,7 @@ export default function CartScreen() {
                         </Pressable>
                       </LinearGradient>
 
-                      {item.category?.toLowerCase().includes('swallow') && showSoupBadge && (
+                      {/* {item.category?.toLowerCase().includes('swallow') && showSoupBadge && (
                         <Pressable
                           onPress={() => {
                             Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -246,9 +262,9 @@ export default function CartScreen() {
                             <IconSymbol name="arrow.right" size={11} color="rgba(255,255,255,0.8)" />
                           </View>
                         </Pressable>
-                      )}
+                      )} */}
 
-                      {item.category?.toLowerCase().includes('soup') && showSwallowBadge && (
+                      {/* {item.category?.toLowerCase().includes('soup') && (
                         <Pressable
                           onPress={() => {
                             Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -292,12 +308,12 @@ export default function CartScreen() {
                               color: '#FFFFFF',
                               letterSpacing: 0.3,
                             }}>
-                              Add a Swallow
+                              Extra Swallow
                             </Text>
                             <IconSymbol name="arrow.right" size={11} color="rgba(255,255,255,0.8)" />
                           </View>
                         </Pressable>
-                      )}
+                      )} */}
                     </View>
                   </React.Fragment>
                 ))}
@@ -347,7 +363,7 @@ export default function CartScreen() {
             <View style={[styles.drawerHandle, { backgroundColor: currentColors.border }]} />
             <View style={styles.drawerHeader}>
               <Image source={swallowImage} style={styles.drawerHeaderImage} />
-              <Text style={[styles.drawerTitle, { color: currentColors.text }]}>Add a Swallow</Text>
+              <Text style={[styles.drawerTitle, { color: currentColors.text }]}>Add extra Swallow</Text>
               <Pressable onPress={closeSwallowDrawer} style={styles.drawerClose}>
                 <IconSymbol name="xmark" size={20} color={currentColors.textSecondary} />
               </Pressable>
@@ -421,10 +437,19 @@ export default function CartScreen() {
 
         <Dialog
           visible={dialogVisible}
-          title={dialogType === 'remove' ? 'Remove Item' : 'Empty Cart'}
+          title={
+            dialogType === 'remove' ? 'Remove Item'
+            : dialogType === 'login' ? 'Sign In Required'
+            : dialogType === 'closed' ? 'Ordering Unavailable'
+            : 'Empty Cart'
+          }
           message={
             dialogType === 'remove'
               ? 'Are you sure you want to remove this item from your cart?'
+              : dialogType === 'login'
+              ? 'Please sign in to proceed to checkout.'
+              : dialogType === 'closed'
+              ? closedMessage
               : 'Please add items to your cart before checking out.'
           }
           buttons={
@@ -432,6 +457,11 @@ export default function CartScreen() {
               ? [
                   { text: 'Cancel', onPress: () => setItemToRemove(null), style: 'cancel' },
                   { text: 'Remove', onPress: handleConfirmRemove, style: 'destructive' },
+                ]
+              : dialogType === 'login'
+              ? [
+                  { text: 'Cancel', onPress: () => {}, style: 'cancel' },
+                  { text: 'Sign In', onPress: () => router.push('/(tabs)/profile'), style: 'default' },
                 ]
               : [
                   { text: 'OK', onPress: () => {}, style: 'default' },

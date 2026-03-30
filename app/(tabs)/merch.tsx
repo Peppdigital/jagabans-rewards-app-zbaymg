@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from "react";
+import { useState, useEffect } from "react";
 import {
   View,
   Text,
@@ -14,7 +14,9 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { IconSymbol } from "@/components/IconSymbol";
 import { useApp } from "@/contexts/AppContext";
+import { useAuth } from "@/contexts/AuthContext";
 import Toast from "@/components/Toast";
+import Dialog from "@/components/Dialog";
 import * as Haptics from "expo-haptics";
 import { merchService } from "@/services/supabaseService";
 import { MerchItem } from "@/types";
@@ -23,6 +25,15 @@ import { LinearGradient } from "expo-linear-gradient";
 export default function MerchScreen() {
   const router = useRouter();
   const { currentColors, userProfile } = useApp();
+  const { isAuthenticated } = useAuth();
+  const [loginDialogVisible, setLoginDialogVisible] = useState(!isAuthenticated);
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setLoginDialogVisible(true);
+    }
+  }, [isAuthenticated]);
+
   const [merchItems, setMerchItems] = useState<MerchItem[]>([]);
   const [loading, setLoading] = useState(true);
   // Toast state
@@ -250,7 +261,7 @@ export default function MerchScreen() {
                                 {item.pointsCost}
                               </Text>
                             </View>
-                            {item.inStock && (
+                            {/* {item.inStock && (
                               <LinearGradient
                                 colors={[currentColors.secondary, currentColors.highlight]}
                                 start={{ x: 0, y: 0 }}
@@ -271,7 +282,7 @@ export default function MerchScreen() {
                                   </Text>
                                 </Pressable>
                               </LinearGradient>
-                            )}
+                            )} */}
                           </View>
                         </View>
                       </LinearGradient>
@@ -290,6 +301,17 @@ export default function MerchScreen() {
           currentColors={currentColors}
         />
       </SafeAreaView>
+      <Dialog
+        visible={loginDialogVisible}
+        title="Sign In Required"
+        message="Please sign in to access Merch."
+        buttons={[
+          { text: 'Cancel', onPress: () => router.back(), style: 'cancel' },
+          { text: 'Sign In', onPress: () => router.replace('/(tabs)/profile'), style: 'default' },
+        ]}
+        onHide={() => setLoginDialogVisible(false)}
+        currentColors={currentColors}
+      />
     </LinearGradient>
   );
 }

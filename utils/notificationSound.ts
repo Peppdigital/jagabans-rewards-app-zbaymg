@@ -2,25 +2,20 @@ import * as Notifications from 'expo-notifications';
 import * as Haptics from 'expo-haptics';
 import { Platform } from 'react-native';
 
-/**
- * Play a sound notification when order status changes to ready
- * This will play a sound and haptic feedback on native platforms
- */
 export const playOrderReadySound = async () => {
   try {
-    // Haptic feedback for all platforms except web
     if (Platform.OS !== 'web') {
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     }
 
-    // Send a notification with custom sound on native platforms
     if (Platform.OS !== 'web') {
       await Notifications.scheduleNotificationAsync({
         content: {
           title: '🎉 Order Ready!',
           body: 'Your order is ready for pickup or delivery',
-          sound: 'default',
+          sound: true,                    // ✅ `true` = use device default sound
           priority: Notifications.AndroidNotificationPriority.MAX,
+          ...(Platform.OS === 'android' && { channelId: 'orders_ready' }), // ✅ route to correct channel
         },
         trigger: null,
       });
@@ -30,13 +25,8 @@ export const playOrderReadySound = async () => {
   }
 };
 
-/**
- * Configure notification settings on app startup
- * This ensures notifications are properly configured to show sounds
- */
 export const configureNotificationSound = async () => {
   try {
-    // Set notification handler to always show alert when received while app is open
     Notifications.setNotificationHandler({
       handleNotification: async () => ({
         shouldShowAlert: true,
@@ -47,9 +37,7 @@ export const configureNotificationSound = async () => {
       }),
     });
 
-    // iOS-specific configuration
     if (Platform.OS === 'ios') {
-      // Request permission for notifications if not already granted
       const { status: existingStatus } = await Notifications.getPermissionsAsync();
       let finalStatus = existingStatus;
       if (existingStatus !== 'granted') {
@@ -62,24 +50,22 @@ export const configureNotificationSound = async () => {
       }
     }
 
-    // Android-specific configuration
     if (Platform.OS === 'android') {
       await Notifications.setNotificationChannelAsync('default', {
         name: 'default',
         importance: Notifications.AndroidImportance.MAX,
         vibrationPattern: [0, 250, 250, 250],
         lightColor: '#FF231F7C',
-        sound: 'default',
+        sound: null,               // ✅ valid here — Android channel accepts 'default'
         enableVibrate: true,
       });
 
-      // Create a special channel for order notifications
       await Notifications.setNotificationChannelAsync('orders_ready', {
         name: 'Order Ready Alerts',
         importance: Notifications.AndroidImportance.MAX,
         vibrationPattern: [0, 200, 100, 200],
         lightColor: '#FF231F7C',
-        sound: 'default',
+        sound: null,               // ✅ valid here too
         enableVibrate: true,
       });
     }

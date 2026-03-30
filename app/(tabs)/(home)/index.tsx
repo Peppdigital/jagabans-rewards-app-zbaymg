@@ -23,19 +23,18 @@ import { imageService } from "@/services/supabaseService";
 import Toast from "@/components/Toast";
 import { LinearGradient } from "expo-linear-gradient";
 import { BlurView } from "expo-blur";
-import { isLosAngelesMonday } from "@/utils/mondayBlock";
+import { getOrderingStatus } from "@/utils/mondayBlock";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
 const menuCategories = [
   "All",
   "Appetizers",
-  "Specials",
+  "Specialties",
   "Jollof Rice Plates",
   "White Rice Plates",
-  "Peppa Pasta Plates",
+  "Pasta Plates",
   "Soups x Dips",
-  "Swallows",
   "Extras",
   "Drinks",
 ];
@@ -67,8 +66,9 @@ export default function HomeScreen() {
   const scrollViewRef = useRef<ScrollView>(null);
   const categoryScrollY = useRef(0);
 
-  // Monday ordering block
-  const isMonday = isLosAngelesMonday();
+  // Ordering hours block
+  const orderingStatus = getOrderingStatus();
+  const isMonday = !orderingStatus.isOpen;
 
   // Toast state
   const [toastVisible, setToastVisible] = useState(false);
@@ -146,7 +146,7 @@ export default function HomeScreen() {
   const handleAddToCart = (item: any) => {
     if (isMonday) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      showToast("error", "We're closed on Mondays. See you Tuesday!");
+      showToast("error", orderingStatus.message);
       return;
     }
 
@@ -328,7 +328,7 @@ export default function HomeScreen() {
             color="#5FE8D0"
           />
           <Text style={styles.mondayBannerText}>
-            We're closed today (Monday). Online ordering resumes Tuesday.
+            {orderingStatus.message}
           </Text>
         </View>
       )}

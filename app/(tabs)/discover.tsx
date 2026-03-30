@@ -18,6 +18,7 @@ import { useApp } from '@/contexts/AppContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { socialService, Post } from '@/services/socialService';
 import { IconSymbol } from '@/components/IconSymbol';
+import Dialog from '@/components/Dialog';
 import * as Haptics from 'expo-haptics';
 import { getTimeAgo } from '@/utils/timeUtils';
 import Share from 'react-native-share';
@@ -27,6 +28,14 @@ export default function DiscoverScreen() {
   const router = useRouter();
   const { currentColors, showToast } = useApp();
   const { isAuthenticated } = useAuth();
+  const [loginDialogVisible, setLoginDialogVisible] = useState(!isAuthenticated);
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setLoginDialogVisible(true);
+    }
+  }, [isAuthenticated]);
+
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -133,9 +142,9 @@ export default function DiscoverScreen() {
       
       // Use the new share utility to format the share message with deep links
       // This now downloads the image locally first
-      const shareOptions = await formatPostShareOptions(
+      const shareOptions = formatPostShareOptions(
         post.user?.name || 'Jagabans L.A.',
-        post.caption,
+        post.caption || '',
         post.id,
         post.imageUrl
       );
@@ -458,6 +467,17 @@ export default function DiscoverScreen() {
           }
         />
       </SafeAreaView>
+      <Dialog
+        visible={loginDialogVisible}
+        title="Sign In Required"
+        message="Please sign in to access Discover."
+        buttons={[
+          { text: 'Cancel', onPress: () => router.back(), style: 'cancel' },
+          { text: 'Sign In', onPress: () => router.replace('/(tabs)/profile'), style: 'default' },
+        ]}
+        onHide={() => setLoginDialogVisible(false)}
+        currentColors={currentColors}
+      />
     </LinearGradient>
   );
 }

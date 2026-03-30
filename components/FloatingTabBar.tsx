@@ -76,7 +76,7 @@ export default function FloatingTabBar({
             {tabs.map((tab) => {
               const active = isActive(tab.route);
               const isCartTab = tab.name === 'cart';
-              
+
               return (
                 <TouchableOpacity
                   key={tab.name}

@@ -36,7 +36,7 @@ export default function AdminMenuManagement() {
     name: "",
     description: "",
     price: "",
-    category: "Main Dishes",
+    category: "Appetizers",
     image: "",
     available: true,
   });
@@ -246,7 +246,7 @@ export default function AdminMenuManagement() {
       name: "",
       description: "",
       price: "",
-      category: "Main Dishes",
+      category: "Appetizers",
       image: "",
       available: true,
     });

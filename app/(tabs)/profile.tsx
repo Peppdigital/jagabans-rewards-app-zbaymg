@@ -262,10 +262,10 @@ export default function ProfileScreen() {
           }
         } else {
           showLocalToast("success", "Welcome back!");
-          
+
           // Save credentials if remember me is checked
           await saveCredentials(email, password, rememberMe);
-          
+
           // Clear password after successful sign in (keep email if remember me is checked)
           setPassword("");
           setShowPassword(false);

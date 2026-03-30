@@ -15,7 +15,7 @@ import { useApp } from "@/contexts/AppContext";
 import { IconSymbol } from "@/components/IconSymbol";
 import * as Haptics from "expo-haptics";
 import { MenuItem } from "@/types";
-import { isLosAngelesMonday } from "@/utils/mondayBlock";
+import { getOrderingStatus } from "@/utils/mondayBlock";
 
 export default function ItemDetailScreen() {
   const { id } = useLocalSearchParams();
@@ -25,8 +25,9 @@ export default function ItemDetailScreen() {
   const [item, setItem] = useState<MenuItem | null>(null);
   const [lastAddedQuantity, setLastAddedQuantity] = useState(1);
 
-  // Monday ordering block
-  const isMonday = isLosAngelesMonday();
+  // Ordering hours block
+  const orderingStatus = getOrderingStatus();
+  const isMonday = !orderingStatus.isOpen;
 
   // Notification state
   const [showNotification, setShowNotification] = useState(false);
@@ -293,7 +294,7 @@ export default function ItemDetailScreen() {
                   { color: '#FFFFFF' },
                 ]}
               >
-                {isMonday ? "We're Closed Today" : "Added to Cart!"}
+                {isMonday ? "We're Closed" : "Added to Cart!"}
               </Text>
               <Text
                 style={[
@@ -302,7 +303,7 @@ export default function ItemDetailScreen() {
                 ]}
               >
                 {isMonday
-                  ? "Online ordering is unavailable on Mondays."
+                  ? orderingStatus.message
                   : `${lastAddedQuantity} ${item.name}`}
               </Text>
             </View>
@@ -339,7 +340,7 @@ export default function ItemDetailScreen() {
                       size={14}
                       color="#FFFFFF"
                     />
-                    <Text style={styles.badgeText}>Closed Mondays</Text>
+                    <Text style={styles.badgeText}>Closed</Text>
                   </View>
                 )}
                 {item.popular && (
@@ -403,7 +404,7 @@ export default function ItemDetailScreen() {
                 color="#FFFFFF"
               />
               <Text style={styles.mondayNoticeText}>
-                We're closed on Mondays. Come back Tuesday!
+                {orderingStatus.message}
               </Text>
             </View>
           )}
@@ -510,7 +511,7 @@ export default function ItemDetailScreen() {
               color="#888888"
             />
             <Text style={[styles.addButtonText, { color: "#888888" }]}>
-              Closed — Back Tuesday
+              Closed
             </Text>
           </Pressable>
         ) : (
