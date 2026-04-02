@@ -1,0 +1,178 @@
+DECLARE
+  v_order_id uuid;
+  v_metadata jsonb;
+  v_user_id uuid;
+  v_order_type text;
+  v_delivery_address text;
+  v_pickup_notes text;
+  v_items jsonb;
+  v_subtotal numeric;
+  v_tax numeric;
+  v_total numeric;
+  v_points_earned integer;
+  v_points_used integer;
+  v_points_discount numeric;
+  v_order_result jsonb;
+  v_pending_order_id uuid;
+BEGIN
+  -- Idempotency guard
+  SELECT 
+    jsonb_build_object(
+      'id', o.id,
+      'customer_name', up.name,
+      'customer_email', up.email,
+      'customer_phone', up.phone,
+      'items', COALESCE(jsonb_agg(
+        jsonb_build_object('name', oi.name, 'price', oi.price, 'quantity', oi.quantity)
+      ) FILTER (WHERE oi.id IS NOT NULL), '[]'::jsonb),
+      'subtotal', o.subtotal,
+      'tax', o.tax,
+      'total', o.total,
+      'delivery_address', o.delivery_address,
+      'pickup_notes', o.pickup_notes,
+      'order_type', CASE WHEN o.delivery_address IS NOT NULL THEN 'delivery' ELSE 'pickup' END,
+      'points_earned', o.points_earned
+    )
+  INTO v_order_result
+  FROM orders o
+  JOIN user_profiles up ON up.id = o.user_id
+  LEFT JOIN order_items oi ON oi.order_id = o.id
+  WHERE o.payment_id = stripe_payment_intent_id
+  GROUP BY o.id, up.name, up.email, up.phone, o.subtotal, o.tax, o.total,
+           o.delivery_address, o.pickup_notes, o.points_earned;
+
+  IF v_order_result IS NOT NULL THEN
+    RAISE NOTICE 'Order already exists for payment %, returning existing', stripe_payment_intent_id;
+    RETURN v_order_result;
+  END IF;
+
+  -- ── 1. Get stripe_payments record (for user_id + pending_order_id) ──────────
+  SELECT
+    (metadata->>'user_id')::uuid,
+    (metadata->>'pending_order_id')::uuid
+  INTO v_user_id, v_pending_order_id
+  FROM stripe_payments
+  WHERE payment_id = stripe_payment_intent_id;
+
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Payment record not found for payment intent: %', stripe_payment_intent_id;
+  END IF;
+
+  IF v_pending_order_id IS NULL THEN
+    RAISE EXCEPTION 'pending_order_id missing from payment metadata for: %', stripe_payment_intent_id;
+  END IF;
+
+  -- ── 2. Load full order payload from pending_orders ───────────────────────────
+  SELECT payload INTO v_metadata
+  FROM pending_orders
+  WHERE id = v_pending_order_id
+    AND user_id = v_user_id;   -- sanity check: must belong to same user
+
+  IF v_metadata IS NULL THEN
+    RAISE EXCEPTION 'Pending order % not found (or user mismatch)', v_pending_order_id;
+  END IF;
+
+  -- ── 3. Extract fields (same as before, just sourced from pending_orders) ────
+  v_order_type       := v_metadata->>'order_type';
+  v_delivery_address := v_metadata->>'delivery_address';
+  v_pickup_notes     := v_metadata->>'pickup_notes';
+  v_items            := (v_metadata->>'items')::jsonb;
+  v_subtotal         := (v_metadata->>'subtotal')::numeric;
+  v_tax              := (v_metadata->>'tax')::numeric;
+  v_total            := (v_metadata->>'total')::numeric;
+  v_points_earned    := (v_metadata->>'points_earned')::integer;
+  v_points_used      := COALESCE((v_metadata->>'points_used')::integer, 0);
+  v_points_discount  := COALESCE((v_metadata->>'points_discount')::numeric, 0);
+
+  -- ── 4. Create order (unchanged) ─────────────────────────────────────────────
+  INSERT INTO orders (
+    user_id, status, payment_status, payment_id,
+    subtotal, tax, total, delivery_address, pickup_notes,
+    points_earned, cancellation_deadline
+  ) VALUES (
+    v_user_id,
+    'preparing',
+    'succeeded',
+    stripe_payment_intent_id,
+    v_subtotal, v_tax, v_total,
+    CASE WHEN v_order_type = 'delivery' THEN v_delivery_address ELSE NULL END,
+    v_pickup_notes,
+    v_points_earned,
+    NOW() + INTERVAL '5 minutes'
+  )
+  RETURNING id INTO v_order_id;
+
+  RAISE NOTICE 'Created order % for payment %', v_order_id, stripe_payment_intent_id;
+
+  -- ── 5. Insert order items (unchanged) ───────────────────────────────────────
+  IF v_items IS NOT NULL AND jsonb_array_length(v_items) > 0 THEN
+    INSERT INTO order_items (order_id, menu_item_id, name, price, quantity)
+    SELECT
+      v_order_id,
+      (item->>'id')::integer,
+      item->>'name',
+      (item->>'price')::numeric,
+      (item->>'quantity')::integer
+    FROM jsonb_array_elements(v_items) AS item;
+
+    RAISE NOTICE 'Inserted % order items', jsonb_array_length(v_items);
+  END IF;
+
+  -- ── 6. Handle points (unchanged) ────────────────────────────────────────────
+  IF v_points_used > 0 THEN
+    UPDATE user_profiles
+    SET points = GREATEST(0, COALESCE(points, 0) - v_points_used)
+    WHERE id = v_user_id;
+  END IF;
+
+  IF v_points_earned > 0 THEN
+    UPDATE user_profiles
+    SET points = COALESCE(points, 0) + v_points_earned
+    WHERE id = v_user_id;
+  END IF;
+
+  -- ── 7. Order event (unchanged) ───────────────────────────────────────────────
+  INSERT INTO order_events (order_id, type, payload)
+  VALUES (
+    v_order_id,
+    'order_created',
+    jsonb_build_object(
+      'user_id', v_user_id,
+      'order_type', v_order_type,
+      'total', v_total,
+      'payment_intent_id', stripe_payment_intent_id
+    )
+  );
+
+  -- ── 8. Clean up pending order ────────────────────────────────────────────────
+  DELETE FROM pending_orders WHERE id = v_pending_order_id;
+  RAISE NOTICE 'Deleted pending order %', v_pending_order_id;
+
+  -- ── 9. Return complete order (unchanged) ─────────────────────────────────────
+  SELECT 
+    jsonb_build_object(
+      'id', o.id,
+      'customer_name', up.name,
+      'customer_email', up.email,
+      'customer_phone', up.phone,
+      'items', COALESCE(jsonb_agg(
+        jsonb_build_object('name', oi.name, 'price', oi.price, 'quantity', oi.quantity)
+      ) FILTER (WHERE oi.id IS NOT NULL), '[]'::jsonb),
+      'subtotal', o.subtotal,
+      'tax', o.tax,
+      'total', o.total,
+      'delivery_address', o.delivery_address,
+      'pickup_notes', o.pickup_notes,
+      'order_type', CASE WHEN o.delivery_address IS NOT NULL THEN 'delivery' ELSE 'pickup' END,
+      'points_earned', o.points_earned
+    )
+  INTO v_order_result
+  FROM orders o
+  JOIN user_profiles up ON up.id = o.user_id
+  LEFT JOIN order_items oi ON oi.order_id = o.id
+  WHERE o.id = v_order_id
+  GROUP BY o.id, up.name, up.email, up.phone, o.subtotal, o.tax, o.total,
+           o.delivery_address, o.pickup_notes, o.points_earned;
+
+  RETURN v_order_result;
+END;

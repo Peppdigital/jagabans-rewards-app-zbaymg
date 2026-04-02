@@ -98,7 +98,7 @@ export default function ImagePicker({
     if (error) throw error;
 
     const publicUrl = imageService.getPublicUrl(bucket, fileName);
-    onImageSelected(publicUrl);
+    onImageSelected(publicUrl!);
 
     if (Platform.OS !== 'web') {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);

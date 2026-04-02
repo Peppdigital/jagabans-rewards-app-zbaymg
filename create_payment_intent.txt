@@ -1,0 +1,192 @@
+// import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import Stripe from 'npm:stripe';
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
+Deno.serve(async (req) => {
+  // Handle CORS preflight requests
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders });
+  }
+
+  try {
+    // Get Stripe secret key from environment
+    const stripeSecretKey = Deno.env.get('STRIPE_SECRET_KEY');
+    if (!stripeSecretKey) {
+      console.error('❌ STRIPE_SECRET_KEY not configured');
+      throw new Error('STRIPE_SECRET_KEY not configured');
+    }
+
+    // Initialize Stripe
+    const stripe = new Stripe(stripeSecretKey, {
+      apiVersion: '2025-12-15.clover',
+      httpClient: Stripe.createFetchHttpClient(),
+    });
+
+    // Get Supabase client
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
+    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+    // Get authorization header
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader) {
+      console.error('❌ No authorization header');
+      throw new Error('No authorization header');
+    }
+
+    // Verify user
+    const token = authHeader.replace('Bearer ', '');
+    const { data: { user }, error: userError } = await supabase.auth.getUser(token);
+    
+    if (userError || !user) {
+      console.error('❌ Unauthorized:', userError);
+      throw new Error('Unauthorized');
+    }
+
+    console.log('✓ Creating payment intent for user:', user.id);
+
+    // Parse request body
+    const { 
+      amount, 
+      currency = 'usd', 
+      customerId,
+      setupFutureUsage,
+      pendingOrder,       // ← replaces metadata
+    } = await req.json();
+
+    if (!amount || !pendingOrder) {
+      throw new Error('Missing required fields: amount, pendingOrder');
+    }
+
+    // 1. Save the full order snapshot to pending_orders
+    const { data: pendingOrderRecord, error: pendingError } = await supabase
+      .from('pending_orders')
+      .insert({
+        user_id: user.id,
+        payload: pendingOrder,
+      })
+      .select('id')
+      .single();
+
+    if (pendingError || !pendingOrderRecord) {
+      throw new Error(`Failed to store pending order: ${pendingError?.message}`);
+    }
+
+    console.log('✓ Pending order saved:', pendingOrderRecord.id);
+
+    // Validate amount (must be positive integer in cents)
+    if (typeof amount !== 'number' || amount <= 0) {
+      console.error('❌ Invalid amount:', amount);
+      throw new Error('Invalid amount');
+    }
+
+    console.log('✓ Request validated - amount:', amount, 'customer:', customerId);
+
+    // Get user profile for customer info
+    const { data: profile } = await supabase
+      .from('user_profiles')
+      .select('name, email')
+      .eq('user_id', user.id)
+      .single();
+
+    console.log('✓ User profile:', profile?.name || 'unknown');
+
+    // Create payment intent configuration
+    // 2. Only two fields go into Stripe metadata — always well under 500 chars
+    const paymentIntentConfig: any = {
+      amount: Math.round(amount),
+      currency: currency.toLowerCase(),
+      automatic_payment_methods: {
+        enabled: true,
+        allow_redirects: 'never',
+      },
+      metadata: {
+        user_id: user.id,
+        pending_order_id: pendingOrderRecord.id,
+      },
+      description: `Order for ${profile?.name || user.email}`,
+      receipt_email: profile?.email || user.email || undefined,
+    };
+
+    // Add customer if provided - CRITICAL for saved cards
+    if (customerId) {
+      console.log('✓ Adding customer to payment intent:', customerId);
+      paymentIntentConfig.customer = customerId;
+    } else {
+      console.warn('⚠️ No customer ID provided - saved cards will not be available');
+    }
+
+    // Add setup future usage if requested (for saving payment methods)
+    if (setupFutureUsage) {
+      console.log('✓ Setting up future usage:', setupFutureUsage);
+      paymentIntentConfig.setup_future_usage = setupFutureUsage;
+    }
+
+    // Create Stripe PaymentIntent
+    console.log('Creating Stripe PaymentIntent...');
+    const paymentIntent = await stripe.paymentIntents.create(paymentIntentConfig);
+
+    console.log('✓ PaymentIntent created:', paymentIntent.id);
+
+    // Create ephemeral key for customer (REQUIRED for Payment Sheet to show saved cards)
+    let ephemeralKeySecret = null;
+    if (customerId) {
+      try {
+        console.log('Creating ephemeral key for customer:', customerId);
+        const ephemeralKey = await stripe.ephemeralKeys.create(
+          { customer: customerId },
+          { apiVersion: '2023-10-16' }
+        );
+        ephemeralKeySecret = ephemeralKey.secret;
+        console.log('✓ Ephemeral key created successfully');
+      } catch (ephemeralError) {
+        console.error('❌ Error creating ephemeral key:', ephemeralError);
+        // Don't throw - payment intent was created successfully
+        // But log the error so we know saved cards won't work
+      }
+    } else {
+      console.warn('⚠️ No customer ID provided - cannot create ephemeral key');
+    }
+
+    // Return client secret and ephemeral key
+    const response = {
+      success: true,
+      clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id,
+      customerId: customerId || null,
+      ephemeralKey: ephemeralKeySecret, // This is REQUIRED for showing saved cards
+    };
+
+    console.log('✓ Returning response:');
+    console.log('  - Payment Intent ID:', paymentIntent.id);
+    console.log('  - Customer ID:', customerId || 'none');
+    console.log('  - Ephemeral Key:', ephemeralKeySecret ? 'present' : 'missing');
+
+    return new Response(
+      JSON.stringify(response),
+      {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        status: 200,
+      }
+    );
+  } catch (error) {
+    console.error('❌ Error creating payment intent:', error);
+    console.error('Error details:', error.message);
+    console.error('Error stack:', error.stack);
+    return new Response(
+      JSON.stringify({
+        success: false,
+        error: error.message || 'Failed to create payment intent',
+      }),
+      {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        status: 400,
+      }
+    );
+  }
+});

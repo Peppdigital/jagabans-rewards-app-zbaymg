@@ -126,6 +126,51 @@ const GOOGLE_PLACES_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_PLACES_API_KEY || '
 
 const POINTS_TO_DOLLAR_RATE = 0.01;
 const DISCOUNT_PERCENTAGE = 0.15;
+
+const COUNTRY_CODES = [
+  { code: '+1',   flag: '🇺🇸', label: 'United States (+1)' },
+  { code: '+1',   flag: '🇨🇦', label: 'Canada (+1)' },
+  { code: '+44',  flag: '🇬🇧', label: 'United Kingdom (+44)' },
+  { code: '+234', flag: '🇳🇬', label: 'Nigeria (+234)' },
+  { code: '+233', flag: '🇬🇭', label: 'Ghana (+233)' },
+  { code: '+27',  flag: '🇿🇦', label: 'South Africa (+27)' },
+  { code: '+254', flag: '🇰🇪', label: 'Kenya (+254)' },
+  { code: '+251', flag: '🇪🇹', label: 'Ethiopia (+251)' },
+  { code: '+225', flag: '🇨🇮', label: "Côte d'Ivoire (+225)" },
+  { code: '+212', flag: '🇲🇦', label: 'Morocco (+212)' },
+  { code: '+20',  flag: '🇪🇬', label: 'Egypt (+20)' },
+  { code: '+61',  flag: '🇦🇺', label: 'Australia (+61)' },
+  { code: '+91',  flag: '🇮🇳', label: 'India (+91)' },
+  { code: '+49',  flag: '🇩🇪', label: 'Germany (+49)' },
+  { code: '+33',  flag: '🇫🇷', label: 'France (+33)' },
+  { code: '+34',  flag: '🇪🇸', label: 'Spain (+34)' },
+  { code: '+39',  flag: '🇮🇹', label: 'Italy (+39)' },
+  { code: '+31',  flag: '🇳🇱', label: 'Netherlands (+31)' },
+  { code: '+46',  flag: '🇸🇪', label: 'Sweden (+46)' },
+  { code: '+47',  flag: '🇳🇴', label: 'Norway (+47)' },
+  { code: '+55',  flag: '🇧🇷', label: 'Brazil (+55)' },
+  { code: '+52',  flag: '🇲🇽', label: 'Mexico (+52)' },
+  { code: '+81',  flag: '🇯🇵', label: 'Japan (+81)' },
+  { code: '+82',  flag: '🇰🇷', label: 'South Korea (+82)' },
+  { code: '+86',  flag: '🇨🇳', label: 'China (+86)' },
+  { code: '+971', flag: '🇦🇪', label: 'UAE (+971)' },
+  { code: '+966', flag: '🇸🇦', label: 'Saudi Arabia (+966)' },
+  { code: '+65',  flag: '🇸🇬', label: 'Singapore (+65)' },
+];
+
+/** Split a stored E.164-style phone into country code + local digits. */
+function parseStoredPhone(phone: string): { code: string; number: string } {
+  if (!phone) return { code: '+1', number: '' };
+  const sorted = COUNTRY_CODES.map(c => c.code).sort((a, b) => b.length - a.length);
+  for (const code of sorted) {
+    if (phone.startsWith(code)) {
+      return { code, number: phone.slice(code.length).replace(/\D/g, '') };
+    }
+  }
+  return { code: '+1', number: phone.replace(/\D/g, '') };
+}
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const POINTS_REWARD_PERCENTAGE = 0.05;
 const QUOTE_REFRESH_BUFFER_MS = 60_000;
 const FALLBACK_DELIVERY_FEE = 19.99; // applied when Uber quote is unavailable
@@ -151,6 +196,13 @@ function CheckoutContent() {
 
   const [orderType, setOrderType] = useState<OrderType>('pickup');
   const [deliveryAddress, setDeliveryAddress] = useState(userProfile?.address || '');
+  const parsedPhone = parseStoredPhone(userProfile?.phone || '');
+  const [phoneCountryCode, setPhoneCountryCode] = useState(parsedPhone.code);
+  const [phoneNumber, setPhoneNumber] = useState(parsedPhone.number);
+  const [phoneTouched, setPhoneTouched] = useState(false);
+  const [showCountryPicker, setShowCountryPicker] = useState(false);
+  const [deliveryEmail, setDeliveryEmail] = useState(userProfile?.email || '');
+  const [emailTouched, setEmailTouched] = useState(false);
   const [pickupNotes, setPickupNotes] = useState('');
   const [usePoints, setUsePoints] = useState(false);
   const [processing, setProcessing] = useState(false);
@@ -182,13 +234,28 @@ function CheckoutContent() {
   const [toastMessage, setToastMessage] = useState('');
   const [toastType, setToastType] = useState<'success' | 'error' | 'info'>('success');
 
-  // ── Sync saved address from profile ──────────────────────────────────────
+  // ── Sync saved address/phone from profile ────────────────────────────────
 
   useEffect(() => {
     if (userProfile?.address && !deliveryAddress) {
       setDeliveryAddress(userProfile.address);
     }
   }, [userProfile?.address]);
+
+  useEffect(() => {
+    if (userProfile?.phone && !phoneNumber) {
+      const parsed = parseStoredPhone(userProfile.phone);
+      setPhoneCountryCode(parsed.code);
+      setPhoneNumber(parsed.number);
+    }
+  }, [userProfile?.phone, phoneNumber]);
+
+  useEffect(() => {
+    if (userProfile?.email && !deliveryEmail) {
+      setDeliveryEmail(userProfile.email);
+    }
+  }, [userProfile?.email, deliveryEmail]);
+
 
   // ── Computed values ───────────────────────────────────────────────────────
 
@@ -212,6 +279,9 @@ function CheckoutContent() {
   const pointsToEarn = Math.floor(
     (subtotalAfterDiscount * POINTS_REWARD_PERCENTAGE) / POINTS_TO_DOLLAR_RATE
   );
+
+  const isPhoneValid = phoneNumber.replace(/\D/g, '').length >= 7;
+  const isEmailValid = EMAIL_REGEX.test(deliveryEmail.trim());
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -488,6 +558,13 @@ function CheckoutContent() {
     return () => clearTimeout(timer);
   }, [deliveryQuote?.expires, orderType]);
 
+  // Auto-validate prefilled address when switching to delivery (no user interaction yet)
+  useEffect(() => {
+    if (orderType === 'delivery' && deliveryAddress.trim() && !addressValidation && !addressTouched) {
+      validateAddress(deliveryAddress);
+    }
+  }, [orderType, deliveryAddress, addressValidation, addressTouched, validateAddress]);
+
   // Debounced address validation (for manual typing — skipped when a suggestion was just selected)
   useEffect(() => {
     if (orderType !== 'delivery' || !addressTouched || !deliveryAddress.trim()) return;
@@ -505,82 +582,85 @@ function CheckoutContent() {
   // ── Payment sheet ─────────────────────────────────────────────────────────
 
   const initializePaymentSheet = useCallback(async () => {
-    if (!userProfile) throw new Error('User profile not found');
+  if (!userProfile) throw new Error('User profile not found');
 
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) throw new Error('Not authenticated');
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) throw new Error('Not authenticated');
 
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) throw new Error('User not found');
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('User not found');
 
-    const { data: customerData } = await supabase
-      .from('user_profiles')
-      .select('stripe_customer_id')
-      .eq('user_id', user.id)
-      .single<{ stripe_customer_id: string | null }>();
+  const { data: customerData } = await supabase
+    .from('user_profiles')
+    .select('stripe_customer_id')
+    .eq('user_id', user.id)
+    .single<{ stripe_customer_id: string | null }>();
 
-    let customerId = customerData?.stripe_customer_id;
+  let customerId = customerData?.stripe_customer_id;
 
-    if (!customerId) {
-      const res = await fetch(`${SUPABASE_URL}/functions/v1/create-stripe-customer`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-        body: JSON.stringify({ email: userProfile?.email || user.email, name: userProfile?.name }),
-      });
-      if (!res.ok) throw new Error('Failed to create Stripe customer');
-      const { customerId: newId } = await res.json();
-      customerId = newId;
-    }
-
-    if (orderType === 'delivery' && deliveryQuote && isQuoteExpired()) {
-      const addr = validatedAddress || deliveryAddress;
-      if (addr) await fetchDeliveryQuote(addr);
-    }
-
-    const pointsUsed = usePoints ? Math.floor(pointsDiscount / POINTS_TO_DOLLAR_RATE) : 0;
-    const orderItems = cart.map((item) => ({
-      id: item.id, name: item.name, price: item.price, quantity: item.quantity,
-    }));
-
-    const response = await fetch(`${SUPABASE_URL}/functions/v1/create-payment-intent`, {
+  if (!customerId) {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/create-stripe-customer`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-      body: JSON.stringify({
-        amount: Math.round(total * 100),
-        currency: 'usd',
-        customerId,
-        setupFutureUsage: 'off_session',
-        metadata: {
-          user_id: user.id,
-          order_type: orderType,
-          delivery_address: orderType === 'delivery' ? (validatedAddress || deliveryAddress) : '',
-          delivery_address_uber: orderType === 'delivery' ? (validatedUberAddress || '') : '',
-          pickup_notes: pickupNotes || '',
-          items: JSON.stringify(orderItems),
-          subtotal: subtotal.toFixed(2),
-          tax: tax.toFixed(2),
-          delivery_fee: deliveryFee.toFixed(2),
-          total: total.toFixed(2),
-          discount: discount.toFixed(2),
-          points_earned: pointsToEarn.toString(),
-          points_used: pointsUsed.toString(),
-          points_discount: pointsDiscount.toFixed(2),
-          item_count: cart.length.toString(),
-          customer_name: userProfile?.name || '',
-          customer_email: userProfile?.email || user.email || '',
-          customer_phone: userProfile?.phone || '',
-          uber_quote_id: deliveryQuote?.quoteId || '',
-        },
-      }),
+      body: JSON.stringify({ email: userProfile?.email || user.email, name: userProfile?.name }),
     });
+    if (!res.ok) throw new Error('Failed to create Stripe customer');
+    const { customerId: newId } = await res.json();
+    customerId = newId;
+  }
 
-    if (!response.ok) throw new Error('Failed to create payment intent');
-    return response.json();
-  }, [
-    total, orderType, cart, userProfile, validatedAddress, deliveryAddress, validatedUberAddress, pickupNotes,
-    subtotal, tax, discount, deliveryFee, pointsToEarn, usePoints, pointsDiscount,
-    deliveryQuote, isQuoteExpired, fetchDeliveryQuote,
-  ]);
+  if (orderType === 'delivery' && deliveryQuote && isQuoteExpired()) {
+    const addr = validatedAddress || deliveryAddress;
+    if (addr) await fetchDeliveryQuote(addr, validatedUberAddress || undefined);
+  }
+
+  const pointsUsed = usePoints ? Math.floor(pointsDiscount / POINTS_TO_DOLLAR_RATE) : 0;
+  const orderItems = cart.map((item) => ({
+    id: item.id, name: item.name, price: item.price, quantity: item.quantity,
+  }));
+
+  // ── Full order snapshot — goes to pending_orders, NOT Stripe metadata ──
+  const pendingOrderPayload = {
+    order_type: orderType,
+    delivery_address: orderType === 'delivery' ? (validatedAddress || deliveryAddress) : '',
+    delivery_address_uber: orderType === 'delivery' ? (validatedUberAddress || '') : '',
+    pickup_notes: pickupNotes || '',
+    items: orderItems,           // full objects, no JSON.stringify needed
+    subtotal: subtotal,
+    tax: tax,
+    delivery_fee: deliveryFee,
+    total: total,
+    discount: discount,
+    points_earned: pointsToEarn,
+    points_used: pointsUsed,
+    points_discount: pointsDiscount,
+    customer_name: userProfile?.name || '',
+    customer_email: (orderType === 'delivery' ? deliveryEmail : userProfile?.email) || user.email || '',
+    customer_phone: orderType === 'delivery'
+      ? `${phoneCountryCode}${phoneNumber}`
+      : (userProfile?.phone || ''),
+    uber_quote_id: deliveryQuote?.quoteId || '',
+  };
+
+  const response = await fetch(`${SUPABASE_URL}/functions/v1/create-payment-intent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+    body: JSON.stringify({
+      amount: Math.round(total * 100),
+      currency: 'usd',
+      customerId,
+      setupFutureUsage: 'off_session',
+      pendingOrder: pendingOrderPayload,  // ← replaces the old metadata blob
+    }),
+  });
+
+  if (!response.ok) throw new Error('Failed to create payment intent');
+  return response.json();
+}, [
+  total, orderType, cart, userProfile, validatedAddress, deliveryAddress, validatedUberAddress, pickupNotes,
+  subtotal, tax, discount, deliveryFee, pointsToEarn, usePoints, pointsDiscount,
+  deliveryQuote, isQuoteExpired, fetchDeliveryQuote, deliveryEmail, phoneCountryCode, phoneNumber,
+]);
 
   // ── Order polling ─────────────────────────────────────────────────────────
 
@@ -677,6 +757,18 @@ function CheckoutContent() {
         return;
       }
 
+      if (!isPhoneValid) {
+        setPhoneTouched(true);
+        showToast('error', 'Please enter a valid phone number (at least 7 digits).');
+        return;
+      }
+
+      if (!isEmailValid) {
+        setEmailTouched(true);
+        showToast('error', 'Please enter a valid email address.');
+        return;
+      }
+
       if (addressTouched && addressValidation) {
         if (!addressValidation.isValid) {
           Alert.alert(
@@ -701,7 +793,7 @@ function CheckoutContent() {
     }
 
     await proceedWithPayment();
-  }, [orderType, deliveryAddress, addressTouched, addressValidation, outsideRadiusError, showToast, proceedWithPayment]);
+  }, [orderType, deliveryAddress, addressTouched, addressValidation, outsideRadiusError, showToast, proceedWithPayment, isPhoneValid, isEmailValid]);
 
   // ── Styles ────────────────────────────────────────────────────────────────
 
@@ -834,6 +926,29 @@ function CheckoutContent() {
       fontFamily: 'Inter_400Regular',
       color: currentColors.textSecondary,
     },
+    // Phone / email fields
+    phoneRow: { flexDirection: 'row', gap: 8, alignItems: 'stretch' },
+    countryCodeButton: {
+      borderRadius: 0, borderWidth: 2, paddingHorizontal: 12,
+      justifyContent: 'center', alignItems: 'center', flexDirection: 'row', gap: 4,
+      backgroundColor: currentColors.card, borderColor: currentColors.border,
+      boxShadow: '0px 4px 12px rgba(212, 175, 55, 0.25)', elevation: 4,
+    },
+    countryCodeText: { fontSize: 15, fontFamily: 'Inter_600SemiBold', color: currentColors.text },
+    countryPickerDropdown: {
+      marginTop: 4, borderWidth: 2, borderColor: currentColors.border,
+      backgroundColor: currentColors.card, borderRadius: 0, overflow: 'hidden',
+      boxShadow: '0px 8px 24px rgba(0,0,0,0.18)', elevation: 12,
+    },
+    countryPickerRow: {
+      paddingHorizontal: 16, paddingVertical: 12,
+      borderBottomWidth: 1, borderBottomColor: currentColors.border,
+    },
+    countryPickerRowLast: { borderBottomWidth: 0 },
+    countryPickerRowText: { fontSize: 14, fontFamily: 'Inter_400Regular', color: currentColors.text },
+    countryPickerRowTextSelected: { fontFamily: 'Inter_600SemiBold', color: currentColors.secondary },
+    fieldValidationMsg: { fontSize: 12, fontFamily: 'Inter_400Regular', marginTop: 6, paddingHorizontal: 2 },
+    singleLineInput: { minHeight: undefined, paddingVertical: 14 },
     // Quote card
     quoteCard: {
       marginTop: 12, padding: 14, borderRadius: 0, borderWidth: 2,
@@ -1112,8 +1227,9 @@ function CheckoutContent() {
               </View>
             </View>
 
-            {/* Delivery Address + Autocomplete + Quote */}
+            {/* Delivery Address + Autocomplete + Quote + Phone */}
             {orderType === 'delivery' && (
+              <>
               <View style={[styles.section, { zIndex: 100 }]}>
                 <Text style={styles.sectionTitle}>Delivery Address *</Text>
                 <View style={styles.inputContainer}>
@@ -1197,6 +1313,99 @@ function CheckoutContent() {
                 {/* Delivery quote — appears below address once fetched */}
                 {renderDeliveryQuoteCard()}
               </View>
+
+              {/* Phone number for delivery */}
+              <View style={[styles.section, { marginTop: 8, marginBottom: 0 }]}>
+                <Text style={styles.sectionTitle}>Phone Number *</Text>
+                <View style={styles.phoneRow}>
+                  {/* Country code selector */}
+                  <Pressable
+                    style={styles.countryCodeButton}
+                    onPress={() => { if (!processing) setShowCountryPicker(v => !v); }}
+                    disabled={processing}
+                  >
+                    <Text style={styles.countryCodeText}>
+                      {COUNTRY_CODES.find(c => c.code === phoneCountryCode)?.flag ?? ''} {phoneCountryCode}
+                    </Text>
+                    <IconSymbol name="arrow-drop-down" size={18} color={currentColors.text} />
+                  </Pressable>
+
+                  {/* Local number */}
+                  <TextInput
+                    style={[styles.input, styles.singleLineInput, { flex: 1,
+                      borderColor: phoneTouched && !isPhoneValid ? '#EF4444' : currentColors.border }]}
+                    placeholder="Phone number"
+                    placeholderTextColor={currentColors.textSecondary}
+                    value={phoneNumber}
+                    onChangeText={text => { setPhoneNumber(text.replace(/\D/g, '')); setPhoneTouched(true); }}
+                    onBlur={() => setPhoneTouched(true)}
+                    keyboardType="phone-pad"
+                    textContentType="telephoneNumber"
+                    editable={!processing}
+                    returnKeyType="done"
+                    maxLength={15}
+                  />
+                </View>
+
+                {/* Country picker dropdown */}
+                {showCountryPicker && (
+                  <View style={styles.countryPickerDropdown}>
+                    {COUNTRY_CODES.map((cc, idx) => (
+                      <Pressable
+                        key={`${cc.flag}-${cc.code}`}
+                        style={[
+                          styles.countryPickerRow,
+                          idx === COUNTRY_CODES.length - 1 && styles.countryPickerRowLast,
+                        ]}
+                        onPress={() => {
+                          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                          setPhoneCountryCode(cc.code);
+                          setShowCountryPicker(false);
+                        }}
+                      >
+                        <Text style={[
+                          styles.countryPickerRowText,
+                          cc.code === phoneCountryCode && styles.countryPickerRowTextSelected,
+                        ]}>
+                          {cc.flag}  {cc.label}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                )}
+
+                {phoneTouched && !isPhoneValid && (
+                  <Text style={[styles.fieldValidationMsg, { color: '#EF4444' }]}>
+                    Please enter a valid phone number (at least 7 digits).
+                  </Text>
+                )}
+              </View>
+
+              {/* Email for delivery */}
+              {/* <View style={[styles.section, { marginTop: 8, marginBottom: 0 }]}>
+                <Text style={styles.sectionTitle}>Email *</Text>
+                <TextInput
+                  style={[styles.input, styles.singleLineInput, {
+                    borderColor: emailTouched && !isEmailValid ? '#EF4444' : currentColors.border,
+                  }]}
+                  placeholder="Your email address..."
+                  placeholderTextColor={currentColors.textSecondary}
+                  value={deliveryEmail}
+                  onChangeText={text => { setDeliveryEmail(text); setEmailTouched(true); }}
+                  keyboardType="email-address"
+                  textContentType="emailAddress"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  editable={!processing}
+                  returnKeyType="done"
+                />
+                {emailTouched && !isEmailValid && (
+                  <Text style={[styles.fieldValidationMsg, { color: '#EF4444' }]}>
+                    Please enter a valid email address.
+                  </Text>
+                )}
+              </View> */}
+              </>
             )}
 
             {/* Notes */}

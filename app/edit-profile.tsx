@@ -11,6 +11,8 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Keyboard,
+  Modal,
+  FlatList,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -28,6 +30,37 @@ import { supabase, SUPABASE_URL } from './integrations/supabase/client';
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const GOOGLE_PLACES_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_PLACES_API_KEY || '';
+
+const COUNTRY_CODES = [
+  { code: '+1',   flag: '🇺🇸', name: 'United States' },
+  { code: '+1',   flag: '🇨🇦', name: 'Canada' },
+  { code: '+44',  flag: '🇬🇧', name: 'United Kingdom' },
+  { code: '+234', flag: '🇳🇬', name: 'Nigeria' },
+  { code: '+233', flag: '🇬🇭', name: 'Ghana' },
+  { code: '+27',  flag: '🇿🇦', name: 'South Africa' },
+  { code: '+254', flag: '🇰🇪', name: 'Kenya' },
+  { code: '+251', flag: '🇪🇹', name: 'Ethiopia' },
+  { code: '+225', flag: '🇨🇮', name: "Côte d'Ivoire" },
+  { code: '+212', flag: '🇲🇦', name: 'Morocco' },
+  { code: '+20',  flag: '🇪🇬', name: 'Egypt' },
+  { code: '+61',  flag: '🇦🇺', name: 'Australia' },
+  { code: '+91',  flag: '🇮🇳', name: 'India' },
+  { code: '+49',  flag: '🇩🇪', name: 'Germany' },
+  { code: '+33',  flag: '🇫🇷', name: 'France' },
+  { code: '+34',  flag: '🇪🇸', name: 'Spain' },
+  { code: '+39',  flag: '🇮🇹', name: 'Italy' },
+  { code: '+31',  flag: '🇳🇱', name: 'Netherlands' },
+  { code: '+46',  flag: '🇸🇪', name: 'Sweden' },
+  { code: '+47',  flag: '🇳🇴', name: 'Norway' },
+  { code: '+55',  flag: '🇧🇷', name: 'Brazil' },
+  { code: '+52',  flag: '🇲🇽', name: 'Mexico' },
+  { code: '+81',  flag: '🇯🇵', name: 'Japan' },
+  { code: '+82',  flag: '🇰🇷', name: 'South Korea' },
+  { code: '+86',  flag: '🇨🇳', name: 'China' },
+  { code: '+971', flag: '🇦🇪', name: 'UAE' },
+  { code: '+966', flag: '🇸🇦', name: 'Saudi Arabia' },
+  { code: '+65',  flag: '🇸🇬', name: 'Singapore' },
+];
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -55,8 +88,21 @@ export default function EditProfileScreen() {
   
   const [name, setName] = useState(userProfile?.name || '');
   const [email, setEmail] = useState(userProfile?.email || '');
-  const [phone, setPhone] = useState(userProfile?.phone || '');
+  const [countryCode, setCountryCode] = useState(() => {
+    const p = userProfile?.phone || '';
+    const match = p.match(/^(\+\d{1,4})\s*(.*)/);
+    return match ? match[1] : '+1';
+  });
+  const [phoneNumber, setPhoneNumber] = useState(() => {
+    const p = userProfile?.phone || '';
+    const match = p.match(/^(\+\d{1,4})\s*(.*)/);
+    return match ? match[2] : p;
+  });
   const [address, setAddress] = useState(userProfile?.address || '');
+  const [emailError, setEmailError] = useState('');
+  const [phoneError, setPhoneError] = useState('');
+  const [showCountryPicker, setShowCountryPicker] = useState(false);
+  const [countrySearch, setCountrySearch] = useState('');
   const [profileImagePath, setProfileImagePath] = useState<string | null>(userProfile?.profileImage || null);
   const [profileImageUrl, setProfileImageUrl] = useState<string | null>(null);
   
@@ -302,12 +348,37 @@ export default function EditProfileScreen() {
     );
   };
 
+  const validateEmail = (value: string): string => {
+    if (!value) return 'Email is required';
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(value)) return 'Please enter a valid email address';
+    return '';
+  };
+
+  const validatePhone = (code: string, number: string): string => {
+    if (!number) return '';
+    if (!code.match(/^\+\d{1,4}$/)) return 'Invalid country code (e.g. +1, +44)';
+    const digitsOnly = number.replace(/\D/g, '');
+    if (digitsOnly.length < 7 || digitsOnly.length > 15) return 'Phone number must be 7–15 digits';
+    return '';
+  };
+
   const handleSave = async () => {
     if (Platform.OS !== 'web') {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     }
 
-    if (!name || !email) {
+    const emailErr = validateEmail(email);
+    const phoneErr = validatePhone(countryCode, phoneNumber);
+    setEmailError(emailErr);
+    setPhoneError(phoneErr);
+
+    if (emailErr || phoneErr) {
+      showToast('error', 'Please fix the errors below');
+      return;
+    }
+
+    if (!name) {
       showToast('error', 'Please fill in required fields');
       return;
     }
@@ -317,16 +388,18 @@ export default function EditProfileScreen() {
       return;
     }
 
+    const fullPhone = phoneNumber ? `${countryCode} ${phoneNumber}` : '';
+
     setSaving(true);
     try {
       // Determine which image path to save
       const imagePathToSave = profileImagePath || userProfile?.profileImage;
-      
+
       // Update profile in backend - save the path, not the signed URL
       const { data, error } = await userService.updateUserProfile(user.id, {
         name,
         email,
-        phone,
+        phone: fullPhone,
         address,
         profileImage: imagePathToSave || undefined,
       });
@@ -608,42 +681,130 @@ export default function EditProfileScreen() {
               <Text style={[styles.inputLabel, { color: currentColors.text }]}>Email</Text>
               <TextInput
                 style={[
-                  styles.input, 
-                  { 
-                    backgroundColor: currentColors.card, 
-                    color: currentColors.text, 
-                    borderColor: currentColors.border
+                  styles.input,
+                  {
+                    backgroundColor: currentColors.card,
+                    color: currentColors.text,
+                    borderColor: emailError ? '#EF4444' : currentColors.border,
                   }
                 ]}
                 value={email}
-                onChangeText={setEmail}
+                onChangeText={(text) => { setEmail(text); setEmailError(''); }}
+                onBlur={() => setEmailError(validateEmail(email))}
                 placeholder="Enter your email"
                 placeholderTextColor={currentColors.textSecondary}
                 keyboardType="email-address"
                 autoCapitalize="none"
                 editable={!saving}
               />
+              {emailError ? (
+                <Text style={styles.fieldError}>{emailError}</Text>
+              ) : null}
             </View>
 
             <View style={styles.inputGroup}>
               <Text style={[styles.inputLabel, { color: currentColors.text }]}>Phone</Text>
-              <TextInput
-                style={[
-                  styles.input, 
-                  { 
-                    backgroundColor: currentColors.card, 
-                    color: currentColors.text, 
-                    borderColor: currentColors.border
-                  }
-                ]}
-                value={phone}
-                onChangeText={setPhone}
-                placeholder="Enter your phone"
-                placeholderTextColor={currentColors.textSecondary}
-                keyboardType="phone-pad"
-                editable={!saving}
-              />
+              <View style={styles.phoneRow}>
+                <Pressable
+                  style={[
+                    styles.countryCodeButton,
+                    {
+                      backgroundColor: currentColors.card,
+                      borderColor: phoneError ? '#EF4444' : currentColors.border,
+                    }
+                  ]}
+                  onPress={() => { setCountrySearch(''); setShowCountryPicker(true); }}
+                  disabled={saving}
+                >
+                  <Text style={[styles.countryCodeButtonText, { color: currentColors.text }]}>
+                    {COUNTRY_CODES.find(c => c.code === countryCode)?.flag ?? ''} {countryCode}
+                  </Text>
+                  <IconSymbol name="chevron.down" size={14} color={currentColors.textSecondary} />
+                </Pressable>
+                <TextInput
+                  style={[
+                    styles.phoneInput,
+                    {
+                      backgroundColor: currentColors.card,
+                      color: currentColors.text,
+                      borderColor: phoneError ? '#EF4444' : currentColors.border,
+                    }
+                  ]}
+                  value={phoneNumber}
+                  onChangeText={(text) => { setPhoneNumber(text.replace(/\D/g, '')); setPhoneError(''); }}
+                  onBlur={() => setPhoneError(validatePhone(countryCode, phoneNumber))}
+                  placeholder="Phone number"
+                  placeholderTextColor={currentColors.textSecondary}
+                  keyboardType="phone-pad"
+                  maxLength={15}
+                  editable={!saving}
+                />
+              </View>
+              {phoneError ? (
+                <Text style={styles.fieldError}>{phoneError}</Text>
+              ) : null}
             </View>
+
+            {/* Country Code Picker Modal */}
+            <Modal
+              visible={showCountryPicker}
+              transparent
+              animationType="slide"
+              onRequestClose={() => setShowCountryPicker(false)}
+            >
+              <Pressable
+                style={styles.modalOverlay}
+                onPress={() => setShowCountryPicker(false)}
+              >
+                <Pressable
+                  style={[styles.modalSheet, { backgroundColor: currentColors.card, borderColor: currentColors.border }]}
+                  onPress={() => {}}
+                >
+                  <View style={[styles.modalHeader, { borderBottomColor: currentColors.border }]}>
+                    <Text style={[styles.modalTitle, { color: currentColors.text }]}>Country Code</Text>
+                    <Pressable onPress={() => setShowCountryPicker(false)}>
+                      <IconSymbol name="xmark" size={20} color={currentColors.textSecondary} />
+                    </Pressable>
+                  </View>
+                  <TextInput
+                    style={[styles.countrySearchInput, { backgroundColor: currentColors.background, color: currentColors.text, borderColor: currentColors.border }]}
+                    value={countrySearch}
+                    onChangeText={setCountrySearch}
+                    placeholder="Search country..."
+                    placeholderTextColor={currentColors.textSecondary}
+                    autoCapitalize="none"
+                  />
+                  <FlatList
+                    data={COUNTRY_CODES.filter(c =>
+                      c.name.toLowerCase().includes(countrySearch.toLowerCase()) ||
+                      c.code.includes(countrySearch)
+                    )}
+                    keyExtractor={(item, index) => `${item.code}-${item.name}-${index}`}
+                    renderItem={({ item }) => (
+                      <Pressable
+                        style={({ pressed }) => [
+                          styles.countryRow,
+                          { borderBottomColor: currentColors.border },
+                          pressed && { backgroundColor: currentColors.background },
+                          item.code === countryCode && item.name === (COUNTRY_CODES.find(c => c.code === countryCode)?.name) && { backgroundColor: currentColors.secondary + '20' },
+                        ]}
+                        onPress={() => {
+                          setCountryCode(item.code);
+                          setPhoneError('');
+                          setShowCountryPicker(false);
+                          if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                        }}
+                      >
+                        <Text style={styles.countryFlag}>{item.flag}</Text>
+                        <Text style={[styles.countryName, { color: currentColors.text }]}>{item.name}</Text>
+                        <Text style={[styles.countryDialCode, { color: currentColors.textSecondary }]}>{item.code}</Text>
+                      </Pressable>
+                    )}
+                    keyboardShouldPersistTaps="handled"
+                  />
+                </Pressable>
+              </Pressable>
+            </Modal>
             
             <View style={[styles.inputGroup, { zIndex: 100 }]}>
               <Text style={[styles.inputLabel, { color: currentColors.text }]}>Address</Text>
@@ -1007,6 +1168,95 @@ const styles = StyleSheet.create({
   },
   useSuggestionButtonText: {
     fontSize: 13,
+    fontFamily: 'Inter_600SemiBold',
+  },
+  phoneRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  countryCodeButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 16,
+    borderWidth: 2,
+    borderRadius: 0,
+    boxShadow: '0px 4px 12px rgba(212, 175, 55, 0.25)',
+    elevation: 4,
+    minWidth: 100,
+  },
+  countryCodeButtonText: {
+    fontSize: 15,
+    fontFamily: 'Inter_600SemiBold',
+  },
+  phoneInput: {
+    flex: 1,
+    borderRadius: 0,
+    padding: 16,
+    fontSize: 16,
+    fontFamily: 'Inter_400Regular',
+    borderWidth: 2,
+    boxShadow: '0px 4px 12px rgba(212, 175, 55, 0.25)',
+    elevation: 4,
+  },
+  fieldError: {
+    color: '#EF4444',
+    fontSize: 12,
+    fontFamily: 'Inter_400Regular',
+    marginTop: 4,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalSheet: {
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    borderWidth: 1,
+    maxHeight: '70%',
+    paddingBottom: 32,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontFamily: 'Inter_600SemiBold',
+  },
+  countrySearchInput: {
+    margin: 16,
+    padding: 12,
+    borderWidth: 1,
+    borderRadius: 8,
+    fontSize: 15,
+    fontFamily: 'Inter_400Regular',
+  },
+  countryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    gap: 12,
+  },
+  countryFlag: {
+    fontSize: 22,
+  },
+  countryName: {
+    flex: 1,
+    fontSize: 15,
+    fontFamily: 'Inter_400Regular',
+  },
+  countryDialCode: {
+    fontSize: 14,
     fontFamily: 'Inter_600SemiBold',
   },
   infoBox: {
