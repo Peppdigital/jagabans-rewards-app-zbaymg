@@ -15,18 +15,16 @@ import { useApp } from "@/contexts/AppContext";
 import { IconSymbol } from "@/components/IconSymbol";
 import * as Haptics from "expo-haptics";
 import { MenuItem } from "@/types";
-import { getOrderingStatus } from "@/utils/mondayBlock";
 
 export default function ItemDetailScreen() {
   const { id } = useLocalSearchParams();
   const router = useRouter();
-  const { addToCart, currentColors, menuItems } = useApp();
+  const { addToCart, currentColors, menuItems, orderingStatus } = useApp();
   const [quantity, setQuantity] = useState(1);
   const [item, setItem] = useState<MenuItem | null>(null);
   const [lastAddedQuantity, setLastAddedQuantity] = useState(1);
 
-  // Ordering hours block
-  const orderingStatus = getOrderingStatus();
+  // Ordering hours block (driven by app config in context)
   const isMonday = !orderingStatus.isOpen;
 
   // Notification state

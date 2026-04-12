@@ -1861,13 +1861,63 @@ export const imageService = {
    * @param bucket - bucket name
    * @param path - file path
    */
-  async deleteFile(bucket: string, path: string) {
+  async deleteFile(bucket: string, path: string): Promise<{ error: any }> {
     try {
       const { error } = await supabase.storage.from(bucket).remove([path]);
       if (error) throw error;
       return { error: null };
     } catch (error) {
       console.error('Delete file error:', error);
+      return { error };
+    }
+  },
+};
+
+export interface AppConfig {
+  hours_restriction_enabled: boolean;
+  store_manually_closed: boolean;
+}
+
+export const appConfigService = {
+  async getAppConfig(): Promise<{ data: AppConfig | null; error: any }> {
+    try {
+      const { data, error } = await supabase
+        .from('app_config' as any)
+        .select('key, value')
+        .in('key', ['hours_restriction_enabled', 'store_manually_closed']);
+      if (error) throw error;
+      const rows: { key: string; value: string }[] = data ?? [];
+      const get = (key: string, fallback: boolean) => {
+        const row = rows.find((r) => r.key === key);
+        return row ? row.value === 'true' : fallback;
+      };
+      return {
+        data: {
+          hours_restriction_enabled: get('hours_restriction_enabled', true),
+          store_manually_closed: get('store_manually_closed', false),
+        },
+        error: null,
+      };
+    } catch (error) {
+      console.error('Get app config error:', error);
+      return { data: null, error };
+    }
+  },
+
+  async updateAppConfig(config: Partial<AppConfig>): Promise<{ error: any }> {
+    try {
+      const upserts = Object.entries(config).map(([key, value]) => ({
+        key,
+        value: String(value),
+        updated_at: new Date().toISOString(),
+      }));
+      const { error } = await supabase
+        .from('app_config' as any)
+        .upsert(upserts, { onConflict: 'key' });
+      if (error) throw error;
+      return { error: null };
+    } catch (error) {
+      console.error('Update app config error:', error);
       return { error };
     }
   },

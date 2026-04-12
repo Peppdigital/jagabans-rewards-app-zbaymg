@@ -5,16 +5,19 @@ import { useColorScheme } from 'react-native';
 import { useAuth } from './AuthContext';
 import { supabase } from '@/app/integrations/supabase/client';
 import type { Database } from '@/app/integrations/supabase/types';
-import { 
-  userService, 
-  menuService, 
-  orderService, 
-  merchService, 
+import {
+  userService,
+  menuService,
+  orderService,
+  merchService,
   giftCardService,
   notificationService,
   themeService,
-  paymentMethodService
+  paymentMethodService,
+  appConfigService,
+  type AppConfig,
 } from '@/services/supabaseService';
+import { getOrderingStatus, type OrderingStatus } from '@/utils/mondayBlock';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { playOrderReadySound, configureNotificationSound } from '@/utils/notificationSound';
 
@@ -56,6 +59,7 @@ interface AppContextType {
   setMenuItems: (items: MenuItem[]) => void;
   loadMenuItems: () => Promise<void>;
   getUnreadNotificationCount: () => number;
+  orderingStatus: OrderingStatus;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -77,6 +81,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     colorScheme: 'default',
   });
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
+  const [appConfig, setAppConfig] = useState<AppConfig>({
+    hours_restriction_enabled: true,
+    store_manually_closed: false,
+  });
 
   const loadMenuItems = useCallback(async () => {
     try {
@@ -257,6 +265,43 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     loadMenuItems();
   }, [loadMenuItems]);
+
+  // Load app config and subscribe to realtime changes
+  useEffect(() => {
+    // Initial fetch
+    appConfigService.getAppConfig().then(({ data }) => {
+      if (data) setAppConfig(data);
+    });
+
+    // Realtime subscription — re-fetch the full config on any change to app_config rows
+    const channel = supabase
+      .channel('app_config_changes')
+      .on(
+        'postgres_changes' as any,
+        { event: '*', schema: 'public', table: 'app_config' },
+        () => {
+          appConfigService.getAppConfig().then(({ data }) => {
+            if (data) setAppConfig(data);
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  // Compute ordering status from app config + time-based logic
+  const orderingStatus: OrderingStatus = (() => {
+    if (appConfig.store_manually_closed) {
+      return { isOpen: false, message: "We're currently closed. Check back soon." };
+    }
+    if (!appConfig.hours_restriction_enabled) {
+      return { isOpen: true, message: '' };
+    }
+    return getOrderingStatus();
+  })();
   
   // Load user profile when authenticated
   useEffect(() => {
@@ -833,6 +878,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         setMenuItems,
         loadMenuItems,
         getUnreadNotificationCount,
+        orderingStatus,
       }}
     >
       {children}

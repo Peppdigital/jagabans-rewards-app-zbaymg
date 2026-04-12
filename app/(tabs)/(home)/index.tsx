@@ -23,7 +23,6 @@ import { imageService } from "@/services/supabaseService";
 import Toast from "@/components/Toast";
 import { LinearGradient } from "expo-linear-gradient";
 import { BlurView } from "expo-blur";
-import { getOrderingStatus } from "@/utils/mondayBlock";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
@@ -55,7 +54,7 @@ const getResponsivePadding = (basePadding: number) => {
 
 export default function HomeScreen() {
   const router = useRouter();
-  const { currentColors, menuItems, loadMenuItems, addToCart, getUnreadNotificationCount } = useApp();
+  const { currentColors, menuItems, loadMenuItems, addToCart, getUnreadNotificationCount, orderingStatus } = useApp();
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -66,8 +65,7 @@ export default function HomeScreen() {
   const scrollViewRef = useRef<ScrollView>(null);
   const categoryScrollY = useRef(0);
 
-  // Ordering hours block
-  const orderingStatus = getOrderingStatus();
+  // Ordering hours block (driven by app config in context)
   const isMonday = !orderingStatus.isOpen;
 
   // Toast state

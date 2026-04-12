@@ -1,6 +1,5 @@
 import { useApp } from '@/contexts/AppContext';
 import { useAuth } from '@/contexts/AuthContext';
-import { getOrderingStatus } from '@/utils/mondayBlock';
 import { useRef } from 'react';
 import type { CartItem } from '@/contexts/AppContext';
 import React, { useState } from 'react';
@@ -28,7 +27,7 @@ import soupImage from '@/assets/images/soup.jpg';
 const SCREEN_HEIGHT = Dimensions.get('window').height;
 
 export default function CartScreen() {
-  const { cart, updateCartQuantity, removeFromCart, currentColors, menuItems, addToCart } = useApp();
+  const { cart, updateCartQuantity, removeFromCart, currentColors, menuItems, addToCart, orderingStatus } = useApp();
   const { isAuthenticated } = useAuth();
   const router = useRouter();
 
@@ -113,7 +112,6 @@ export default function CartScreen() {
       setDialogVisible(true);
       return;
     }
-    const orderingStatus = getOrderingStatus();
     if (!orderingStatus.isOpen) {
       setDialogType('closed');
       setClosedMessage(orderingStatus.message);

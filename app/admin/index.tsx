@@ -17,7 +17,7 @@ import { IconSymbol } from "@/components/IconSymbol";
 import { colors } from "@/styles/commonStyles";
 import * as Haptics from "expo-haptics";
 import { useAuth } from "@/contexts/AuthContext";
-import { orderService } from "@/services/supabaseService";
+import { orderService, appConfigService, type AppConfig } from "@/services/supabaseService";
 import { supabase } from "@/app/integrations/supabase/client";
 import { useApp } from "@/contexts/AppContext";
 import Dialog from "@/components/Dialog";
@@ -47,6 +47,11 @@ export default function AdminDashboard() {
     revenue: 0,
   });
   const [viewAsAdmin, setViewAsAdmin] = useState(false);
+
+  // Store hours config
+  const [hoursRestrictedEnabled, setHoursRestrictedEnabled] = useState(true);
+  const [storeManuallyClosedState, setStoreManuallyClosedState] = useState(false);
+  const [configLoading, setConfigLoading] = useState(false);
 
   // Dialog state
   const [dialogVisible, setDialogVisible] = useState(false);
@@ -226,6 +231,46 @@ export default function AdminDashboard() {
     // If unchecking, clear saved credentials immediately
     if (!newValue) {
       await clearSavedCredentials();
+    }
+  };
+
+  // Load app config when admin is authenticated
+  useEffect(() => {
+    if (isAuthenticated && isAdmin) {
+      appConfigService.getAppConfig().then(({ data }) => {
+        if (data) {
+          setHoursRestrictedEnabled(data.hours_restriction_enabled);
+          setStoreManuallyClosedState(data.store_manually_closed);
+        }
+      });
+    }
+  }, [isAuthenticated, isAdmin]);
+
+  const handleToggleHoursRestricted = async (value: boolean) => {
+    setHoursRestrictedEnabled(value);
+    if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setConfigLoading(true);
+    const { error } = await appConfigService.updateAppConfig({ hours_restriction_enabled: value });
+    setConfigLoading(false);
+    if (error) {
+      setHoursRestrictedEnabled(!value); // revert
+      showToast('error', 'Failed to update hours setting');
+    } else {
+      showToast('success', value ? 'Operating hours enabled' : 'Store set to always open');
+    }
+  };
+
+  const handleToggleStoreManuallyClosedState = async (value: boolean) => {
+    setStoreManuallyClosedState(value);
+    if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setConfigLoading(true);
+    const { error } = await appConfigService.updateAppConfig({ store_manually_closed: value });
+    setConfigLoading(false);
+    if (error) {
+      setStoreManuallyClosedState(!value); // revert
+      showToast('error', 'Failed to update store status');
+    } else {
+      showToast('success', value ? 'Store manually closed' : 'Store reopened');
     }
   };
 
@@ -658,6 +703,61 @@ export default function AdminDashboard() {
           </View>
         )}
 
+        {/* Store Hours Controls */}
+        <View style={styles.storeControlsContainer}>
+          <View style={styles.storeControlsHeader}>
+            <IconSymbol
+              name={Platform.OS === 'ios' ? "clock.fill" : "schedule"}
+              size={18}
+              color={colors.primary}
+            />
+            <Text style={styles.storeControlsTitle}>Store Hours Controls</Text>
+            {configLoading && <ActivityIndicator size="small" color={colors.primary} style={{ marginLeft: 8 }} />}
+          </View>
+
+          {/* hours_restriction_enabled toggle */}
+          <View style={styles.storeControlRow}>
+            <View style={styles.storeControlLeft}>
+              <Text style={styles.storeControlLabel}>Use Operating Hours</Text>
+              <Text style={styles.storeControlHint}>
+                {hoursRestrictedEnabled
+                  ? 'Ordering follows scheduled hours'
+                  : 'Store is always open for ordering'}
+              </Text>
+            </View>
+            <Switch
+              value={hoursRestrictedEnabled}
+              onValueChange={handleToggleHoursRestricted}
+              trackColor={{ false: colors.border, true: colors.primary }}
+              thumbColor="#FFFFFF"
+              ios_backgroundColor={colors.border}
+              disabled={configLoading}
+            />
+          </View>
+
+          <View style={styles.storeControlDivider} />
+
+          {/* store_manually_closed toggle */}
+          <View style={styles.storeControlRow}>
+            <View style={styles.storeControlLeft}>
+              <Text style={styles.storeControlLabel}>Manually Close Store</Text>
+              <Text style={[styles.storeControlHint, storeManuallyClosedState && styles.storeControlHintDanger]}>
+                {storeManuallyClosedState
+                  ? 'Store is closed — overrides all hours settings'
+                  : 'Store is open (no manual override)'}
+              </Text>
+            </View>
+            <Switch
+              value={storeManuallyClosedState}
+              onValueChange={handleToggleStoreManuallyClosedState}
+              trackColor={{ false: colors.border, true: '#E74C3C' }}
+              thumbColor="#FFFFFF"
+              ios_backgroundColor={colors.border}
+              disabled={configLoading}
+            />
+          </View>
+        </View>
+
         {shouldShowAnalytics && (
           <View style={styles.statsContainer}>
             <View style={styles.statCard}>
@@ -1060,6 +1160,54 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: colors.textSecondary,
     marginTop: 4,
+  },
+  storeControlsContainer: {
+    marginHorizontal: 24,
+    marginBottom: 16,
+    backgroundColor: colors.card,
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  storeControlsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 16,
+  },
+  storeControlsTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: colors.text,
+    flex: 1,
+  },
+  storeControlRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  storeControlLeft: {
+    flex: 1,
+    marginRight: 16,
+  },
+  storeControlLabel: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: colors.text,
+  },
+  storeControlHint: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  storeControlHintDanger: {
+    color: '#E74C3C',
+  },
+  storeControlDivider: {
+    height: 1,
+    backgroundColor: colors.border,
+    marginVertical: 12,
   },
   footer: {
     padding: 24,
