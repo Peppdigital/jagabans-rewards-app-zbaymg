@@ -10,6 +10,7 @@ import {
   TextInput,
   KeyboardAvoidingView,
   RefreshControl,
+  Modal,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
@@ -34,7 +35,7 @@ const STORAGE_KEYS = {
 export default function ProfileScreen() {
   const router = useRouter();
   const { currentColors, userProfile, showToast, loadUserProfile } = useApp();
-  const { isAuthenticated, signIn, signUp, signOut } = useAuth();
+  const { isAuthenticated, signIn, signUp, signOut, resetPassword } = useAuth();
   const [isSignUp, setIsSignUp] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -55,6 +56,11 @@ export default function ProfileScreen() {
   const [profileImageUrl, setProfileImageUrl] = useState<string | null>(null);
   const [imageLoading, setImageLoading] = useState(false);
   
+  // Forgot password state
+  const [forgotPasswordVisible, setForgotPasswordVisible] = useState(false);
+  const [forgotPasswordEmail, setForgotPasswordEmail] = useState('');
+  const [forgotPasswordLoading, setForgotPasswordLoading] = useState(false);
+
   // Dialog state
   const [dialogVisible, setDialogVisible] = useState(false);
   const [dialogConfig, setDialogConfig] = useState({
@@ -322,6 +328,31 @@ export default function ProfileScreen() {
     ]);
   };
 
+  const handleForgotPassword = async () => {
+    if (!forgotPasswordEmail) {
+      showLocalToast('error', 'Please enter your email address');
+      return;
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(forgotPasswordEmail)) {
+      showLocalToast('error', 'Please enter a valid email address');
+      return;
+    }
+    setForgotPasswordLoading(true);
+    try {
+      const { error } = await resetPassword(forgotPasswordEmail);
+      if (error) {
+        showLocalToast('error', error.message || 'Failed to send reset email. Please try again.');
+      } else {
+        setForgotPasswordVisible(false);
+        setForgotPasswordEmail('');
+        showLocalToast('success', 'Password reset link sent! Check your email.');
+      }
+    } finally {
+      setForgotPasswordLoading(false);
+    }
+  };
+
   const handleMenuPress = (route: string) => {
     console.log("Navigating to:", route);
     if (Platform.OS !== "web") {
@@ -517,6 +548,22 @@ export default function ProfileScreen() {
                   </Pressable>
                 )}
 
+                {/* Forgot Password - only on sign in */}
+                {!isSignUp && (
+                  <Pressable
+                    style={styles.forgotPasswordButton}
+                    onPress={() => {
+                      setForgotPasswordEmail(email);
+                      setForgotPasswordVisible(true);
+                    }}
+                    disabled={loading}
+                  >
+                    <Text style={[styles.forgotPasswordText, { color: currentColors.primary }]}>
+                      Forgot Password?
+                    </Text>
+                  </Pressable>
+                )}
+
                 {isSignUp && (
                   <>
                     <LinearGradient
@@ -653,6 +700,84 @@ export default function ProfileScreen() {
             onHide={() => setDialogVisible(false)}
             currentColors={currentColors}
           />
+          <Modal
+            visible={forgotPasswordVisible}
+            transparent
+            animationType="fade"
+            onRequestClose={() => setForgotPasswordVisible(false)}
+          >
+            <Pressable
+              style={styles.modalOverlay}
+              onPress={() => !forgotPasswordLoading && setForgotPasswordVisible(false)}
+            >
+              <Pressable style={styles.modalContent} onPress={() => {}}>
+                <LinearGradient
+                  colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.modalCard}
+                >
+                  <IconSymbol name="lock.rotation" size={40} color={currentColors.primary} />
+                  <Text style={[styles.modalTitle, { color: currentColors.text }]}>Reset Password</Text>
+                  <Text style={[styles.modalSubtitle, { color: currentColors.textSecondary }]}>
+                    Enter your email and we'll send you a link to reset your password.
+                  </Text>
+                  <LinearGradient
+                    colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={[styles.inputContainer, { borderColor: currentColors.border, width: '100%' }]}
+                  >
+                    <IconSymbol name="envelope" size={20} color={currentColors.textSecondary} />
+                    <TextInput
+                      style={[styles.input, { color: currentColors.text }]}
+                      placeholder="Email"
+                      placeholderTextColor={currentColors.textSecondary}
+                      value={forgotPasswordEmail}
+                      onChangeText={setForgotPasswordEmail}
+                      autoCapitalize="none"
+                      keyboardType="email-address"
+                      editable={!forgotPasswordLoading}
+                    />
+                  </LinearGradient>
+                  <LinearGradient
+                    colors={[currentColors.primary, currentColors.secondary]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 0 }}
+                    style={[styles.authButton, { width: '100%', opacity: forgotPasswordLoading ? 0.6 : 1 }]}
+                  >
+                    <Pressable
+                      style={styles.authButtonInner}
+                      onPress={handleForgotPassword}
+                      disabled={forgotPasswordLoading}
+                    >
+                      {forgotPasswordLoading ? (
+                        <View style={styles.loadingContainer}>
+                          <ActivityIndicator size="small" color={currentColors.card} />
+                          <Text style={[styles.authButtonText, { color: currentColors.card, marginLeft: 8 }]}>
+                            Sending...
+                          </Text>
+                        </View>
+                      ) : (
+                        <Text style={[styles.authButtonText, { color: currentColors.card }]}>
+                          Send Reset Link
+                        </Text>
+                      )}
+                    </Pressable>
+                  </LinearGradient>
+                  <Pressable
+                    style={styles.switchButton}
+                    onPress={() => setForgotPasswordVisible(false)}
+                    disabled={forgotPasswordLoading}
+                  >
+                    <Text style={[styles.switchButtonText, { color: currentColors.textSecondary }]}>
+                      Cancel
+                    </Text>
+                  </Pressable>
+                </LinearGradient>
+              </Pressable>
+            </Pressable>
+          </Modal>
         </SafeAreaView>
       </LinearGradient>
     );
@@ -1366,5 +1491,41 @@ const styles = StyleSheet.create({
   },
   menuSubtitle: {
     fontSize: 14,
+  },
+  forgotPasswordButton: {
+    alignSelf: 'flex-end',
+    marginBottom: 16,
+    marginTop: -8,
+  },
+  forgotPasswordText: {
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    width: '90%',
+    maxWidth: 400,
+  },
+  modalCard: {
+    borderRadius: 16,
+    padding: 24,
+    alignItems: 'center',
+  },
+  modalTitle: {
+    fontSize: 22,
+    fontWeight: 'bold',
+    marginTop: 12,
+    marginBottom: 8,
+  },
+  modalSubtitle: {
+    fontSize: 14,
+    textAlign: 'center',
+    marginBottom: 24,
+    lineHeight: 20,
   },
 });

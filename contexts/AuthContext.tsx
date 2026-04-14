@@ -10,6 +10,7 @@ interface AuthContextType {
   signIn: (email: string, password: string) => Promise<{ error: any }>;
   signUp: (email: string, password: string, name: string, phone?: string, inviteCode?: string) => Promise<{ error: any }>;
   signOut: () => Promise<void>;
+  resetPassword: (email: string) => Promise<{ error: any }>;
   isAuthenticated: boolean;
 }
 
@@ -122,6 +123,17 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     }
   };
 
+  const resetPassword = async (email: string) => {
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: 'https://jagabansla.com/reset-password',
+      });
+      return { error };
+    } catch (error: any) {
+      return { error };
+    }
+  };
+
   const signOut = async () => {
     try {
       console.log('Signing out');
@@ -146,6 +158,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         signIn,
         signUp,
         signOut,
+        resetPassword,
         isAuthenticated: !!session,
       }}
     >

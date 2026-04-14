@@ -148,6 +148,7 @@ const MAPPING = ({
   "battery.25": "battery-2-bar",
   "lock.fill": "lock",
   "lock.open.fill": "lock-open",
+  "lock.rotation": "lock-reset",
 
   // Shopping & Commerce
   "cart.fill": "shopping-cart",
