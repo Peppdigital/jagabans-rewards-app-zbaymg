@@ -1,5 +1,5 @@
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   View,
   Text,
@@ -11,7 +11,7 @@ import {
   ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useRouter, useFocusEffect } from "expo-router";
 import { IconSymbol } from "@/components/IconSymbol";
 import { useApp } from "@/contexts/AppContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -26,13 +26,15 @@ export default function MerchScreen() {
   const router = useRouter();
   const { currentColors, userProfile } = useApp();
   const { isAuthenticated } = useAuth();
-  const [loginDialogVisible, setLoginDialogVisible] = useState(!isAuthenticated);
+  const [loginDialogVisible, setLoginDialogVisible] = useState(false);
 
-  useEffect(() => {
-    if (!isAuthenticated) {
-      setLoginDialogVisible(true);
-    }
-  }, [isAuthenticated]);
+  useFocusEffect(
+    useCallback(() => {
+      if (!isAuthenticated) {
+        setLoginDialogVisible(true);
+      }
+    }, [isAuthenticated])
+  );
 
   const [merchItems, setMerchItems] = useState<MerchItem[]>([]);
   const [loading, setLoading] = useState(true);

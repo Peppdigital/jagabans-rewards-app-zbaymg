@@ -40,7 +40,7 @@ export default function FloatingTabBar({
 
   const handleTabPress = (route: string) => {
     console.log('Tab pressed:', route);
-    router.push(route as any);
+    router.navigate(route as any);
   };
 
   const isActive = (route: string) => {

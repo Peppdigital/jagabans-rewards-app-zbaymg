@@ -1,7 +1,6 @@
 
 import React from 'react';
-import { Platform } from 'react-native';
-import { Stack } from 'expo-router';
+import { Tabs } from 'expo-router';
 import FloatingTabBar, { TabBarItem } from '@/components/FloatingTabBar';
 import { colors } from '@/styles/commonStyles';
 
@@ -46,22 +45,19 @@ export default function TabLayout() {
   ];
 
   return (
-    <>
-      <Stack
-        screenOptions={{
-          headerShown: false,
-          animation: 'none',
-          contentStyle: { backgroundColor: colors.background },
-        }}
-      >
-        <Stack.Screen name="(home)" />
-        <Stack.Screen name="cart" />
-        <Stack.Screen name="discover" />
-        <Stack.Screen name="merch" />
-        {/* <Stack.Screen name="giftcards" /> */}
-        <Stack.Screen name="profile" />
-      </Stack>
-      <FloatingTabBar tabs={tabs} />
-    </>
+    <Tabs
+      screenOptions={{
+        headerShown: false,
+        contentStyle: { backgroundColor: colors.background },
+      }}
+      tabBar={() => <FloatingTabBar tabs={tabs} />}
+    >
+      <Tabs.Screen name="(home)" />
+      <Tabs.Screen name="cart" />
+      <Tabs.Screen name="discover" />
+      <Tabs.Screen name="merch" />
+      {/* <Tabs.Screen name="giftcards" /> */}
+      <Tabs.Screen name="profile" />
+    </Tabs>
   );
 }

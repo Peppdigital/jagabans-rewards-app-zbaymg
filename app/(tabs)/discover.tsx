@@ -12,7 +12,7 @@ import {
   Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useApp } from '@/contexts/AppContext';
 import { useAuth } from '@/contexts/AuthContext';
@@ -28,13 +28,15 @@ export default function DiscoverScreen() {
   const router = useRouter();
   const { currentColors, showToast } = useApp();
   const { isAuthenticated } = useAuth();
-  const [loginDialogVisible, setLoginDialogVisible] = useState(!isAuthenticated);
+  const [loginDialogVisible, setLoginDialogVisible] = useState(false);
 
-  useEffect(() => {
-    if (!isAuthenticated) {
-      setLoginDialogVisible(true);
-    }
-  }, [isAuthenticated]);
+  useFocusEffect(
+    useCallback(() => {
+      if (!isAuthenticated) {
+        setLoginDialogVisible(true);
+      }
+    }, [isAuthenticated])
+  );
 
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
