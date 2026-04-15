@@ -6,155 +6,350 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Uber Direct helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface UberAddress {
+  street_address: [string, string];
+  city: string;
+  state: string;
+  zip_code: string;
+  country: string;
+}
+
+interface UberDelivery {
+  id: string;
+  status: string;
+  tracking_url?: string;
+  dropoff_eta?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADDRESS HELPERS  (mirrors get-delivery-quote for consistency)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function parseUberAddress(value: string): UberAddress | null {
+  try {
+    const parsed = JSON.parse(value);
+    if (
+      parsed &&
+      Array.isArray(parsed.street_address) &&
+      parsed.street_address.length === 2 &&
+      typeof parsed.city === 'string' &&
+      typeof parsed.state === 'string' &&
+      typeof parsed.zip_code === 'string' &&
+      typeof parsed.country === 'string'
+    ) {
+      return parsed as UberAddress;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * ⚡ STRIPE WEBHOOK - INGEST ONLY (patched, full HTML)
- *
- * Changes:
- * - Validate required env vars up-front (no non-null assertions).
- * - Use EdgeRuntime.waitUntil(...) for background fire-and-forget work.
- * - Defensive RPC result handling.
- * - Avoid very large console.log dumps; log sizes/keys instead.
+ * Resolves a raw address string (either plain text or a serialised UberAddress
+ * JSON) into the string that should be sent to Uber Direct as dropoff_address.
+ * Plain-text addresses are wrapped in a minimal UberAddress shell — the
+ * verify-address edge function should have already produced a proper structured
+ * address, so this is only a safety fallback.
  */
+function resolveDropoffAddress(raw: string): string {
+  // Already a valid structured UberAddress — use as-is
+  if (parseUberAddress(raw)) {
+    console.log('[dropoff] Using pre-validated structured UberAddress');
+    return raw;
+  }
+
+  // Plain text — wrap in minimal UberAddress shape
+  console.warn('[dropoff] Plain text address received — wrapping in UberAddress shell');
+  const fallback: UberAddress = {
+    street_address: [raw.trim(), ''],
+    city: '',
+    state: '',
+    zip_code: '',
+    country: 'US',
+  };
+  return JSON.stringify(fallback);
+}
+
+/**
+ * Resolves the restaurant pickup address, preferring the fully-structured
+ * RESTAURANT_ADDRESS_UBER env var (same logic as get-delivery-quote).
+ * Falls back to RESTAURANT_ADDRESS if the structured one is absent.
+ */
+function resolvePickupAddress(): string {
+  const structured = Deno.env.get('RESTAURANT_ADDRESS_UBER');
+  if (structured) {
+    if (parseUberAddress(structured)) {
+      console.log('[delivery] Using RESTAURANT_ADDRESS_UBER (structured)');
+      return structured;
+    }
+    console.warn('[delivery] RESTAURANT_ADDRESS_UBER is set but failed to parse — falling back');
+  }
+
+  const plain = Deno.env.get('RESTAURANT_ADDRESS');
+  if (plain) {
+    console.warn('[delivery] Using RESTAURANT_ADDRESS (plain text fallback)');
+    const fallback: UberAddress = {
+      street_address: [plain.trim(), ''],
+      city: '',
+      state: '',
+      zip_code: '',
+      country: 'US',
+    };
+    return JSON.stringify(fallback);
+  }
+
+  throw new Error('Neither RESTAURANT_ADDRESS_UBER nor RESTAURANT_ADDRESS is configured');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 1 — OAuth scope matches get-delivery-quote: 'eats.deliveries direct.organizations'
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function getUberAccessToken(clientId: string, clientSecret: string): Promise<string> {
+  const tokenResponse = await fetch('https://auth.uber.com/oauth/v2/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: 'client_credentials',
+      scope: 'eats.deliveries direct.organizations', // FIX 1: was 'eats.deliveries' only
+    }),
+  });
+
+  if (!tokenResponse.ok) {
+    const errorText = await tokenResponse.text();
+    throw new Error(`Failed to get Uber access token: ${tokenResponse.status} ${errorText}`);
+  }
+
+  const tokenData = await tokenResponse.json();
+  return tokenData.access_token as string;
+}
+
+async function createUberDelivery(
+  accessToken: string,
+  payload: Record<string, unknown>
+): Promise<UberDelivery> {
+  const UBER_CUSTOMER_ID = Deno.env.get('UBER_CUSTOMER_ID');
+  const res = await fetch(`https://api.uber.com/v1/customers/${UBER_CUSTOMER_ID}/deliveries`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Uber createDelivery failed (${res.status}): ${await res.text()}`);
+  }
+
+  return res.json() as Promise<UberDelivery>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Webhook handler
+// ─────────────────────────────────────────────────────────────────────────────
 
 Deno.serve(async (req) => {
-  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
 
   if (req.method !== 'POST') {
-    return new Response(
-      JSON.stringify({ error: 'Method not allowed' }),
-      { status: 405, headers: corsHeaders }
-    );
+    return new Response(JSON.stringify({ error: 'Method not allowed' }), {
+      status: 405,
+      headers: corsHeaders,
+    });
   }
 
   const startTime = Date.now();
 
   try {
-    // --- Validate env vars early ---
+    // ── Env validation ────────────────────────────────────────────────────────
     const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-      console.error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
-      return new Response(
-        JSON.stringify({ error: 'Server misconfigured: missing Supabase credentials' }),
-        { status: 500, headers: corsHeaders }
-      );
+      console.error('Missing Supabase credentials');
+      return new Response(JSON.stringify({ error: 'Server misconfigured' }), {
+        status: 500,
+        headers: corsHeaders,
+      });
     }
 
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+    // ── Parse webhook ─────────────────────────────────────────────────────────
     const webhookPayload = await req.json();
-    console.log('Stripe webhook received type:', webhookPayload?.type ?? '<unknown>');
+    console.log('Stripe webhook type:', webhookPayload?.type ?? '<unknown>');
 
-    // Only handle payment success
     if (webhookPayload.type !== 'payment_intent.succeeded') {
       return new Response(JSON.stringify({ received: true }), { headers: corsHeaders });
     }
 
     const paymentIntent = webhookPayload.data?.object ?? {};
-    const paymentId = paymentIntent.id;
-    const customerId = paymentIntent.customer;
+    const paymentId: string = paymentIntent.id;
+    const stripeCustomerId: string | undefined = paymentIntent.customer;
 
-    console.log('Processing payment intent id:', paymentId, 'customer:', customerId);
-    // Avoid logging the entire payment intent if large; log metadata summary
-    console.log('Payment metadata keys:', Object.keys(paymentIntent.metadata || {}));
+    console.log('Processing payment:', paymentId, '| metadata keys:', Object.keys(paymentIntent.metadata || {}));
 
-    // Determine user_id from metadata OR customer lookup
-    let userId = paymentIntent.metadata?.user_id;
+// ── Resolve user_id ───────────────────────────────────────────────────────
+let userId: string | undefined = paymentIntent.metadata?.user_id;
 
-    if (!userId && customerId) {
-      console.log('No user_id in metadata, looking up from Stripe customer:', customerId);
+if (!userId && stripeCustomerId) {
+  const { data: profile, error: profileError } = await supabase
+    .from('user_profiles')
+    .select('user_id')
+    .eq('stripe_customer_id', stripeCustomerId)
+    .single();
 
-      const { data: profile, error: profileError } = await supabase
-        .from('user_profiles')
-        .select('user_id')
-        .eq('stripe_customer_id', customerId)
-        .single();
+  if (profileError) {
+    console.error('Customer lookup error:', profileError);
+  } else if (profile) {
+    userId = profile.user_id;
+    console.log('Resolved user_id from Stripe customer:', userId);
+  }
+}
 
-      if (profileError) {
-        console.error('Error looking up user from customer:', profileError);
-      } else if (profile) {
-        userId = profile.user_id;
-        console.log('Found user_id from customer:', userId);
-      }
+if (!userId) {
+  throw new Error(
+    'Cannot determine user_id. Metadata must include user_id or customer must be linked to a user_profile.'
+  );
+}
+
+// ── Load pending order payload ────────────────────────────────────────────
+const pendingOrderId = paymentIntent.metadata?.pending_order_id;
+if (!pendingOrderId) throw new Error('Missing pending_order_id in metadata');
+
+const { data: pendingOrder, error: pendingErr } = await supabase
+  .from('pending_orders')
+  .select('payload')
+  .eq('id', pendingOrderId)
+  .eq('user_id', userId)            // sanity: must belong to this user
+  .single();
+
+if (pendingErr || !pendingOrder) {
+  throw new Error(`Pending order not found: ${pendingErr?.message ?? 'no record'}`);
+}
+
+const {
+  items,
+  delivery_address,
+  delivery_address_uber,  // ← from pending_orders, NOT paymentIntent.metadata
+  order_type,
+  uber_quote_id,          // ← from pending_orders, NOT paymentIntent.metadata
+  customer_name,
+  customer_email,
+  customer_phone,
+  pickup_notes,
+} = pendingOrder.payload;
+
+console.log('Pending order loaded | type:', order_type, '| items:', items?.length ?? 0);
+
+// ── PRE-CHECK: Validate delivery is possible before touching anything ─────
+// For delivery orders we verify address and Uber credentials up-front so we
+// can abort cleanly before creating the order, rather than leaving an order
+// with no delivery attached.
+if (order_type === 'delivery') {
+  if (!delivery_address?.trim()) {
+    throw new Error('Delivery order is missing a delivery address');
+  }
+
+  const uberClientId     = Deno.env.get('UBER_CLIENT_ID');
+  const uberClientSecret = Deno.env.get('UBER_CLIENT_SECRET');
+  const uberCustomerId   = Deno.env.get('UBER_CUSTOMER_ID');
+
+  if (!uberClientId || !uberClientSecret || !uberCustomerId) {
+    // Non-fatal — log clearly but don't block order creation.
+    // Delivery can be dispatched manually from the admin dashboard.
+    console.warn(
+      '⚠️  Uber credentials missing (UBER_CLIENT_ID / UBER_CLIENT_SECRET / UBER_CUSTOMER_ID). ' +
+      'Order will be created but delivery will NOT be auto-dispatched.'
+    );
+  } else {
+    // Validate the dropoff address is resolvable before we commit anything
+    const rawDropoff = delivery_address_uber || delivery_address;
+    if (!rawDropoff?.trim()) {
+      throw new Error('Delivery order has no resolvable dropoff address');
     }
-
-    if (!userId) {
-      console.error('Could not determine user_id for payment:', paymentId);
-      console.error('Available metadata keys:', Object.keys(paymentIntent.metadata || {}));
-      throw new Error(
-        'Could not determine user_id for payment. ' +
-        'Payment metadata must include user_id, or customer must be linked to a user_profile.'
-      );
-    }
-
-    console.log('Using user_id:', userId);
-
-    // --- 1️⃣ Store payment record with enhanced metadata ---
-    const enhancedMetadata = {
-      ...paymentIntent.metadata,
+    console.log(
+      '[pre-check] dropoff address structured:',
+      !!parseUberAddress(rawDropoff),
+      '| uber_quote_id present:', !!uber_quote_id
+    );
+  }
+}
+    // ── 1. Store Stripe payment record ────────────────────────────────────────
+const { error: paymentInsertError } = await supabase
+  .from('stripe_payments')
+  .upsert(
+    {
+      payment_id: paymentId,
       user_id: userId,
-    };
+      amount: paymentIntent.amount,
+      currency: paymentIntent.currency,
+      status: 'succeeded',
+      payment_method: paymentIntent.payment_method,
+      // Store only the slim metadata Stripe holds; full snapshot is in pending_orders
+      metadata: { user_id: userId, pending_order_id: pendingOrderId },
+    },
+    { onConflict: 'payment_id' }
+  );
 
-    const { error: paymentInsertError } = await supabase
-      .from('stripe_payments')
-      .upsert(
-        {
-          payment_id: paymentId,
-          user_id: userId,
-          amount: paymentIntent.amount,
-          currency: paymentIntent.currency,
-          status: 'succeeded',
-          payment_method: paymentIntent.payment_method,
-          metadata: enhancedMetadata,
-        },
-        { onConflict: 'payment_id' }
-      );
+if (paymentInsertError) {
+  throw new Error(`Failed to store payment record: ${paymentInsertError.message}`);
+}
+console.log('Payment record stored:', paymentId);
 
-    if (paymentInsertError) {
-      console.error('Error storing payment:', paymentInsertError);
-      throw new Error('Failed to store payment record');
-    }
+// ── 2. Create order via RPC ───────────────────────────────────────────────
+// The RPC reads pending_orders internally and deletes it on success.
+console.log('Creating order via RPC...');
+const { data: rpcRaw, error: rpcError } = await supabase.rpc('create_order_from_payment', {
+  stripe_payment_intent_id: paymentId,
+});
 
-    console.log('Payment record stored for:', paymentId);
+if (rpcError) {
+  throw new Error(`Failed to create order: ${rpcError.message}`);
+}
 
-    // --- 2️⃣ Create Order using RPC function ---
-    console.log('Creating order from payment via RPC...');
-    const { data: rpcRaw, error: rpcError } = await supabase.rpc('create_order_from_payment', {
-      stripe_payment_intent_id: paymentId,
-    });
+const orderData = Array.isArray(rpcRaw) ? rpcRaw[0] : rpcRaw;
+if (!orderData || typeof orderData !== 'object') {
+  throw new Error('RPC returned unexpected shape');
+}
 
-    if (rpcError) {
-      console.error('RPC Error:', rpcError);
-      // Provide concise RPC error to caller
-      throw new Error(`Failed to create order: ${rpcError.message ?? 'RPC error'}`);
-    }
+const order = {
+  id:               orderData.id as string,
+  user_id:          orderData.user_id as string,
+  customer_name:    orderData.customer_name as string,
+  customer_email:   orderData.customer_email as string,
+  customer_phone:   orderData.customer_phone as string,
+  items:            (orderData.items ?? []) as any[],
+  subtotal:         Number(orderData.subtotal ?? 0),
+  tax:              Number(orderData.tax ?? 0),
+  total:            Number(orderData.total ?? 0),
+  delivery_address: orderData.delivery_address as string | null,
+  pickup_notes:     orderData.pickup_notes as string | null,
+  order_type:       orderData.order_type as 'pickup' | 'delivery',
+};
 
-    // Defensive handling: RPC may return an object or array depending on implementation
-    const orderData = Array.isArray(rpcRaw) ? rpcRaw[0] : rpcRaw;
-    if (!orderData || typeof orderData !== 'object') {
-      console.error('RPC returned unexpected shape:', typeof rpcRaw);
-      throw new Error('Failed to create order: No valid data returned from RPC');
-    }
+console.log('Order created:', order.id, '| type:', order.order_type);
+// NOTE: pending_orders row is deleted inside the RPC after a successful insert.
+// No explicit delete needed here.
 
-    console.log('Order created, id:', orderData.id, 'order_type:', orderData.order_type);
-
-    // Build order object defensively
-    const order = {
-      id: orderData.id,
-      user_id: orderData.user_id,
-      customer_name: orderData.customer_name,
-      customer_email: orderData.customer_email,
-      customer_phone: orderData.customer_phone,
-      items: orderData.items ?? [],
-      subtotal: Number(orderData.subtotal ?? 0),
-      tax: Number(orderData.tax ?? 0),
-      total: Number(orderData.total ?? 0),
-      delivery_address: orderData.delivery_address,
-      pickup_notes: orderData.pickup_notes,
-      order_type: orderData.order_type,
+    // ── 3. Background: admin notifications ───────────────────────────────────
+    const FUNCTIONS_URL = Deno.env.get('FUNCTIONS_URL') || `${SUPABASE_URL}/functions/v1`;
+    const notificationHeaders = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      'x-provider': 'stripe-webhook',
+      'x-provider-event-id': paymentId,
     };
 
     const orderPayload = {
@@ -173,384 +368,212 @@ Deno.serve(async (req) => {
       timestamp: new Date().toISOString(),
     };
 
-    
-// --- 3️⃣ Admin Notifications (Background via EdgeRuntime.waitUntil) ---
-const FUNCTIONS_URL = Deno.env.get('FUNCTIONS_URL') || `${SUPABASE_URL}/functions/v1`;
-
-console.log('Scheduling admin notifications (background)');
-
-const notificationHeaders = {
-  'Content-Type': 'application/json',
-  'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-  'x-provider': 'stripe-webhook',
-  'x-provider-event-id': paymentId,
-};
-
-// Email notification
-EdgeRuntime.waitUntil(
-  (async () => {
-    try {
-      const res = await fetch(`${FUNCTIONS_URL}/send-order-confirmation-email`, {
+    EdgeRuntime.waitUntil(
+      fetch(`${FUNCTIONS_URL}/send-order-confirmation-email`, {
         method: 'POST',
         headers: notificationHeaders,
         body: JSON.stringify(orderPayload),
-      });
-      
-      if (!res.ok) {
-        try {
-          const text = await res.text();
-          console.warn('Admin email notification returned', res.status, text);
-        } catch {
-          console.warn('Admin email notification returned', res.status);
-        }
-      } else {
-        console.log('Admin email notification sent');
-      }
-    } catch (err) {
-      try {
-        console.error('Admin email notification error:', err);
-      } catch {
-        // Silently fail
-      }
-    }
-  })()
-);
+      })
+        .then((r) => console.log('Admin email status:', r.status))
+        .catch((e) => console.error('Admin email error:', e))
+    );
 
-// SMS notification
-EdgeRuntime.waitUntil(
-  (async () => {
-    try {
-      const res = await fetch(`${FUNCTIONS_URL}/send-order-confirmation-sms`, {
+    EdgeRuntime.waitUntil(
+      fetch(`${FUNCTIONS_URL}/send-order-confirmation-sms`, {
         method: 'POST',
         headers: notificationHeaders,
         body: JSON.stringify(orderPayload),
-      });
-      
-      if (!res.ok) {
-        try {
-          const text = await res.text();
-          console.warn('Admin SMS notification returned', res.status, text);
-        } catch {
-          console.warn('Admin SMS notification returned', res.status);
-        }
-      } else {
-        console.log('Admin SMS notification sent');
-      }
-    } catch (err) {
-      try {
-        console.error('Admin SMS notification error:', err);
-      } catch {
-        // Silently fail
-      }
-    }
-  })()
-);
+      })
+        .then((r) => console.log('Admin SMS status:', r.status))
+        .catch((e) => console.error('Admin SMS error:', e))
+    );
 
-
-    // --- 4️⃣ Customer Email (improved error handling & background) ---
+    // ── 4. Background: customer confirmation email ────────────────────────────
     const resendApiKey = Deno.env.get('RESEND_API_KEY');
     if (resendApiKey && order.customer_email) {
-      console.log('Scheduling customer email to:', order.customer_email);
-
       const orderNumber = String(order.id).substring(0, 8).toUpperCase();
       const orderDate = new Date().toLocaleDateString('en-US', {
-        weekday: 'long',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
+        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
       });
 
       const itemsHtml = order.items
-        .map((item: any) => `
-        <tr>
-          <td style="padding: 12px 0; border-bottom: 1px solid #f0f0f0;">
-            <div style="font-weight: 500; color: #1a1a1a; margin-bottom: 4px;">${item.name}</div>
-            <div style="font-size: 14px; color: #666;">Qty: ${item.quantity}</div>
-          </td>
-          <td style="padding: 12px 0; border-bottom: 1px solid #f0f0f0; text-align: right; font-weight: 500; color: #1a1a1a;">
-            ${(Number(item.price || 0) * Number(item.quantity || 0)).toFixed(2)}
-          </td>
-        </tr>
-      `)
+        .map(
+          (item: any) => `
+          <tr>
+            <td style="padding:12px 0;border-bottom:1px solid #f0f0f0;">
+              <div style="font-weight:500;color:#1a1a1a;">${item.name}</div>
+              <div style="font-size:14px;color:#666;">Qty: ${item.quantity}</div>
+            </td>
+            <td style="padding:12px 0;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:500;">
+              $${(Number(item.price || 0) * Number(item.quantity || 0)).toFixed(2)}
+            </td>
+          </tr>`
+        )
         .join('');
 
-      const emailHtml = `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Order Confirmation</title>
-</head>
-<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f8f9fa;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f8f9fa; padding: 40px 20px;">
-    <tr>
-      <td align="center">
-        <table width="600" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.07);">
-          
-          <!-- Header with Gradient -->
-          <tr>
-            <td style="background: linear-gradient(135deg, #4AD7C2 0%, #D4AF37 100%); padding: 40px 40px 35px; text-align: center;">
-              <h1 style="margin: 0; color: #ffffff; font-size: 28px; font-weight: 700; letter-spacing: -0.5px;">
-                Order Confirmed
-              </h1>
-              <p style="margin: 8px 0 0; color: rgba(255, 255, 255, 0.95); font-size: 16px;">
-                Thank you for your order!
-              </p>
-            </td>
-          </tr>
+      const emailHtml = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Order Confirmation</title></head>
+<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f8f9fa;">
+<table width="100%" cellpadding="0" cellspacing="0" style="padding:40px 20px;background:#f8f9fa;">
+<tr><td align="center">
+<table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 6px rgba(0,0,0,0.07);">
+  <tr><td style="background:linear-gradient(135deg,#4AD7C2 0%,#D4AF37 100%);padding:40px;text-align:center;">
+    <h1 style="margin:0;color:#fff;font-size:28px;">Order Confirmed</h1>
+    <p style="margin:8px 0 0;color:rgba(255,255,255,0.95);">Thank you for your order!</p>
+  </td></tr>
+  <tr><td style="padding:32px 40px 24px;">
+    <p style="margin:0;font-size:16px;color:#1a1a1a;">Dear ${order.customer_name || 'Valued Customer'},</p>
+    <p style="margin:16px 0 0;font-size:15px;color:#4a5568;line-height:1.6;">
+      We've received your order and our kitchen is preparing your meal.
+      ${order.order_type === 'delivery'
+        ? 'Your order will be delivered to your specified address.'
+        : 'Your order will be ready for pickup in about 20 minutes.'}
+    </p>
+  </td></tr>
+  <tr><td style="padding:0 40px 24px;">
+    <div style="background:#f8f9fa;border-radius:8px;padding:20px;border-left:4px solid #4AD7C2;">
+      <div style="font-size:12px;text-transform:uppercase;letter-spacing:1px;color:#666;font-weight:600;">Order #${orderNumber} &nbsp;·&nbsp; ${orderDate}</div>
+      ${order.order_type === 'delivery' && order.delivery_address
+        ? `<div style="margin-top:12px;font-size:15px;color:#1a1a1a;">📍 ${order.delivery_address}</div>`
+        : ''}
+    </div>
+  </td></tr>
+  <tr><td style="padding:0 40px 24px;">
+    <h2 style="margin:0 0 16px;font-size:18px;color:#1a1a1a;">Order Items</h2>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border-top:2px solid #e2e8f0;">${itemsHtml}</table>
+  </td></tr>
+  <tr><td style="padding:0 40px 32px;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8f9fa;border-radius:8px;padding:20px;">
+      <tr><td style="padding:8px 0;color:#4a5568;">Subtotal</td><td style="text-align:right;font-weight:500;">$${order.subtotal.toFixed(2)}</td></tr>
+      <tr><td style="padding:8px 0;color:#4a5568;">Tax</td><td style="text-align:right;font-weight:500;">$${order.tax.toFixed(2)}</td></tr>
+      <tr><td style="padding:16px 0 0;font-size:18px;font-weight:700;border-top:2px solid #d4af37;">Total</td>
+          <td style="padding:16px 0 0;text-align:right;font-size:20px;color:#4AD7C2;font-weight:700;border-top:2px solid #d4af37;">$${order.total.toFixed(2)}</td></tr>
+    </table>
+  </td></tr>
+  <tr><td style="background:#1a1a1a;padding:32px 40px;text-align:center;">
+    <h3 style="margin:0 0 12px;color:#D4AF37;font-size:22px;">Jagabans L.A.</h3>
+    <p style="margin:0;font-size:14px;color:rgba(255,255,255,0.7);">Questions? <a href="mailto:orders@jagabansla.com" style="color:#4AD7C2;">orders@jagabansla.com</a></p>
+  </td></tr>
+</table></td></tr></table>
+</body></html>`;
 
-          <!-- Order Number Badge -->
-          <tr>
-            <td style="padding: 0 40px;">
-              <div style="margin-top: -20px; background-color: #1a1a1a; color: #D4AF37; padding: 12px 24px; border-radius: 8px; text-align: center; display: inline-block; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);">
-                <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 1px; opacity: 0.8; margin-bottom: 4px;">Order Number</div>
-                <div style="font-size: 20px; font-weight: 700; letter-spacing: 1px;">#${orderNumber}</div>
-              </div>
-            </td>
-          </tr>
-
-          <!-- Greeting -->
-          <tr>
-            <td style="padding: 32px 40px 24px;">
-              <p style="margin: 0; font-size: 16px; color: #1a1a1a; line-height: 1.6;">
-                Dear ${order.customer_name || 'Valued Customer'},
-              </p>
-              <p style="margin: 16px 0 0; font-size: 15px; color: #4a5568; line-height: 1.6;">
-                We've received your order and our kitchen is already preparing your delicious meal. ${order.order_type === 'delivery' ? 'Your order will be delivered to your specified address.' : 'You can pick up your order at our location.'}
-              </p>
-            </td>
-          </tr>
-
-          <!-- Order Details -->
-          <tr>
-            <td style="padding: 0 40px 24px;">
-              <div style="background-color: #f8f9fa; border-radius: 8px; padding: 24px; border-left: 4px solid #4AD7C2;">
-                <table width="100%" cellpadding="0" cellspacing="0">
-                  <tr>
-                    <td style="padding-bottom: 12px;">
-                      <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: #666; font-weight: 600;">Order Type</div>
-                      <div style="font-size: 16px; color: #1a1a1a; font-weight: 500; margin-top: 4px; text-transform: capitalize;">${order.order_type}</div>
-                    </td>
-                    <td style="padding-bottom: 12px; text-align: right;">
-                      <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: #666; font-weight: 600;">Order Date</div>
-                      <div style="font-size: 16px; color: #1a1a1a; font-weight: 500; margin-top: 4px;">${orderDate}</div>
-                    </td>
-                  </tr>
-                  ${order.order_type === 'delivery' && order.delivery_address ? `
-                  <tr>
-                    <td colspan="2" style="padding-top: 12px; border-top: 1px solid #e2e8f0;">
-                      <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: #666; font-weight: 600; margin-bottom: 6px;">Delivery Address</div>
-                      <div style="font-size: 15px; color: #1a1a1a; line-height: 1.5;">${order.delivery_address}</div>
-                    </td>
-                  </tr>
-                  ` : ''}
-                </table>
-              </div>
-            </td>
-          </tr>
-
-          <!-- Order Items -->
-          <tr>
-            <td style="padding: 0 40px 32px;">
-              <h2 style="margin: 0 0 16px; font-size: 18px; color: #1a1a1a; font-weight: 600;">Order Items</h2>
-              <table width="100%" cellpadding="0" cellspacing="0" style="border-top: 2px solid #e2e8f0;">
-                ${itemsHtml}
-              </table>
-            </td>
-          </tr>
-
-          <!-- Order Summary -->
-          <tr>
-            <td style="padding: 0 40px 32px;">
-              <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f8f9fa; border-radius: 8px; padding: 20px;">
-                <tr>
-                  <td style="padding: 8px 0; font-size: 15px; color: #4a5568;">Subtotal</td>
-                  <td style="padding: 8px 0; text-align: right; font-size: 15px; color: #1a1a1a; font-weight: 500;">${order.subtotal.toFixed(2)}</td>
-                </tr>
-                <tr>
-                  <td style="padding: 8px 0; font-size: 15px; color: #4a5568;">Tax</td>
-                  <td style="padding: 8px 0; text-align: right; font-size: 15px; color: #1a1a1a; font-weight: 500;">${order.tax.toFixed(2)}</td>
-                </tr>
-                <tr>
-                  <td style="padding: 16px 0 0; font-size: 18px; color: #1a1a1a; font-weight: 700; border-top: 2px solid #d4af37;">Total</td>
-                  <td style="padding: 16px 0 0; text-align: right; font-size: 20px; color: #4AD7C2; font-weight: 700; border-top: 2px solid #d4af37;">${order.total.toFixed(2)}</td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-
-          <!-- Footer -->
-          <tr>
-            <td style="background-color: #1a1a1a; padding: 32px 40px; text-align: center;">
-              <div style="margin-bottom: 16px;">
-                <h3 style="margin: 0; color: #D4AF37; font-size: 22px; font-weight: 700; letter-spacing: 0.5px;">Jagabans L.A.</h3>
-              </div>
-              <p style="margin: 0 0 12px; font-size: 14px; color: rgba(255, 255, 255, 0.7); line-height: 1.6;">
-                Questions about your order? We're here to help.
-              </p>
-              <p style="margin: 0; font-size: 14px; color: rgba(255, 255, 255, 0.9);">
-                <a href="mailto:orders@jagabansla.com" style="color: #4AD7C2; text-decoration: none;">orders@jagabansla.com</a>
-              </p>
-              <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid rgba(255, 255, 255, 0.1);">
-                <p style="margin: 0; font-size: 12px; color: rgba(255, 255, 255, 0.5);">
-                  © ${new Date().getFullYear()} Jagabans L.A. All rights reserved.
-                </p>
-              </div>
-            </td>
-          </tr>
-
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>
-      `;
-
-      // Send email in background via EdgeRuntime.waitUntil
       EdgeRuntime.waitUntil(
-        (async () => {
-          try {
-            const emailResponse = await fetch('https://api.resend.com/emails', {
-              method: 'POST',
-              headers: {
-                Authorization: `Bearer ${resendApiKey}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                from: 'Jagabans L.A. <info@jagabansla.com>',
-                to: [order.customer_email],
-                subject: `Order Confirmed #${orderNumber} - Jagabans L.A.`,
-                html: emailHtml,
-              }),
-            });
-
-            const emailText = await emailResponse.text();
-            if (emailResponse.ok) {
-              console.log('Customer email scheduled/sent:', emailText);
-            } else {
-              console.error('Customer email failed:', emailResponse.status, emailText);
-            }
-          } catch (err) {
-            console.error('Customer email error:', err);
-          }
-        })()
+        fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${resendApiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from: 'Jagabans L.A. <info@jagabansla.com>',
+            to: [order.customer_email],
+            subject: `Order Confirmed #${orderNumber} - Jagabans L.A.`,
+            html: emailHtml,
+          }),
+        })
+          .then((r) => console.log('Customer email status:', r.status))
+          .catch((e) => console.error('Customer email error:', e))
       );
-    } else {
-      if (!resendApiKey) console.log('RESEND_API_KEY not set, skipping customer email');
-      if (!order.customer_email) console.log('No customer email, skipping customer email');
     }
 
-    // --- 5️⃣ Automatic Uber Direct Delivery (NEW) ---
-    if (order.order_type === 'delivery' && order.delivery_address) {
-      const uberClientId = Deno.env.get('UBER_CLIENT_ID');
-      const uberClientSecret = Deno.env.get('UBER_CLIENT_SECRET');
+   // ── 5. Uber Direct delivery ───────────────────────────────────────────────
+if (order.order_type === 'delivery' && order.delivery_address) {
+  const uberClientId     = Deno.env.get('UBER_CLIENT_ID');
+  const uberClientSecret = Deno.env.get('UBER_CLIENT_SECRET');
 
-      if (uberClientId && uberClientSecret) {
-        console.log('Creating Uber Direct delivery (sync)');
+  if (uberClientId && uberClientSecret) {
+    console.log('Triggering Uber Direct delivery for order:', order.id);
 
-        try {
-          const accessToken = await getUberAccessToken(uberClientId, uberClientSecret);
+    try {
+      const accessToken = await getUberAccessToken(uberClientId, uberClientSecret);
 
-          const deliveryPayload = {
-            external_id: order.id,
-            pickup_name: Deno.env.get('RESTAURANT_NAME') || 'Jagabans L.A.',
-            pickup_phone_number: Deno.env.get('RESTAURANT_PHONE') || '+18182106659',
-            pickup_address: Deno.env.get('RESTAURANT_ADDRESS') || 'Your Restaurant Address, City, State ZIP, Country',
-            pickup_notes: order.pickup_notes || 'Food order ready for pickup',
-            dropoff_name: order.customer_name,
-            dropoff_phone_number: order.customer_phone,
-            dropoff_address: order.delivery_address,
-            dropoff_notes: order.pickup_notes || '',
-            manifest_items: order.items.map((item: any) => ({
-              name: item.name,
-              quantity: item.quantity,
-            })),
-            pickup_ready_dt: new Date().toISOString(),
-          };
+      const manifestItems = order.items.length > 0
+        ? order.items.map((item: any) => ({
+            name: item.name,
+            quantity: Number(item.quantity ?? 1),
+          }))
+        : [{ name: `Order ${order.id.substring(0, 8).toUpperCase()}`, quantity: 1 }];
 
-          // Log a summarized payload only
-          console.log('Uber Direct payload summary:', {
-            external_id: deliveryPayload.external_id,
-            pickup_address: deliveryPayload.pickup_address,
-            dropoff_address: deliveryPayload.dropoff_address,
-            items_count: deliveryPayload.manifest_items.length,
-          });
+      const pickupAddress  = resolvePickupAddress();
 
-          const uberResponse = await fetch('https://sandbox-api.uber.com/v1/deliveries', {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(deliveryPayload),
-          });
+      // ✅ Read from pendingOrder.payload, not paymentIntent.metadata
+      const rawDropoff     = delivery_address_uber || order.delivery_address;
+      const dropoffAddress = resolveDropoffAddress(rawDropoff);
 
-          const uberText = await uberResponse.text();
-          if (uberResponse.ok) {
-            const delivery = JSON.parse(uberText);
-            console.log('Uber Direct delivery created:', delivery.id);
+      console.log('[delivery] pickup structured:', !!parseUberAddress(pickupAddress));
+      console.log('[delivery] dropoff structured:', !!parseUberAddress(dropoffAddress));
 
-            // Update order with Uber delivery info
-            await supabase
-              .from('orders')
-              .update({
-                uber_delivery_id: delivery.id,
-                uber_delivery_status: delivery.status,
-                uber_tracking_url: delivery.tracking_url ?? null,
-                delivery_triggered_at: new Date().toISOString(),
-                updated_at: new Date().toISOString(),
-              })
-              .eq('id', order.id);
+      // ✅ Read from pendingOrder.payload, not paymentIntent.metadata
+      const quoteIdField = uber_quote_id ? { quote_id: uber_quote_id } : {};
 
-            console.log('Order updated with Uber delivery info');
-          } else {
-            console.error('Uber Direct API failed:', uberResponse.status, uberText);
-          }
-        } catch (err) {
-          console.error('Uber Direct error:', err);
-        }
+      const deliveryPayload = {
+        ...quoteIdField,
+        external_id:          order.id,
+        pickup_name:          Deno.env.get('RESTAURANT_NAME') || 'Jagabans L.A.',
+        pickup_phone_number:  Deno.env.get('RESTAURANT_PHONE') || '+18182106659',
+        pickup_address:       pickupAddress,
+        pickup_notes:         'Food order ready for pickup',
+        dropoff_name:         order.customer_name || 'Customer',
+        dropoff_phone_number: order.customer_phone || '+10000000000',
+        dropoff_address:      dropoffAddress,
+        dropoff_notes:        order.pickup_notes || '',
+        manifest_items:       manifestItems,
+        pickup_ready_dt:      new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      };
+
+      console.log('Uber Direct payload summary:', {
+        quote_id:        quoteIdField.quote_id ?? '(none — dynamic pricing)',
+        external_id:     deliveryPayload.external_id,
+        pickup_address:  deliveryPayload.pickup_address,
+        dropoff_address: deliveryPayload.dropoff_address,
+        item_count:      manifestItems.length,
+      });
+
+      const delivery = await createUberDelivery(accessToken, deliveryPayload);
+      console.log('Uber Direct delivery created:', delivery.id, '| status:', delivery.status);
+
+      const { error: uberUpdateError } = await supabase
+        .from('orders')
+        .update({
+          uber_delivery_id:      delivery.id,
+          uber_delivery_status:  delivery.status,
+          uber_tracking_url:     delivery.tracking_url ?? null,
+          uber_delivery_eta:     delivery.dropoff_eta ?? null,
+          delivery_provider:     'uber',
+          delivery_triggered_at: new Date().toISOString(),
+          cancellation_deadline: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+          updated_at:            new Date().toISOString(),
+        })
+        .eq('id', order.id);
+
+      if (uberUpdateError) {
+        console.error('Failed to persist Uber delivery info:', uberUpdateError.message);
       } else {
-        console.log('Uber credentials not set, skipping delivery creation');
+        console.log('Order updated with Uber delivery info');
       }
+    } catch (uberErr) {
+      console.error(
+        'Uber Direct error (non-fatal):',
+        uberErr instanceof Error ? uberErr.message : uberErr
+      );
     }
+  } else {
+    console.warn('UBER credentials not set — delivery dispatch skipped for order:', order.id);
+  }
+}
 
-    // Response
-    const durationMs = Date.now() - startTime;
-    console.log('Webhook processed in', durationMs, 'ms for payment', paymentId);
+
+    // ── Done ──────────────────────────────────────────────────────────────────
+    console.log(`Webhook processed in ${Date.now() - startTime}ms for payment ${paymentId}`);
 
     return new Response(JSON.stringify({ success: true, orderId: order.id }), {
-      headers: corsHeaders,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   } catch (err: any) {
-    console.error('Error processing webhook:', err?.message ?? err);
-    console.error('Error stack:', err?.stack ?? '<no stack>');
+    console.error('Webhook error:', err?.message ?? err);
     return new Response(JSON.stringify({ error: err?.message ?? 'Webhook processing failed' }), {
       status: 500,
       headers: corsHeaders,
     });
   }
 });
-
-// Helper: Uber OAuth
-async function getUberAccessToken(clientId: string, clientSecret: string): Promise<string> {
-  const authString = btoa(`${clientId}:${clientSecret}`);
-
-  const tokenResponse = await fetch('https://login.uber.com/oauth/v2/token', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      Authorization: `Basic ${authString}`,
-    },
-    body: 'grant_type=client_credentials&scope=delivery.read%20delivery.write',
-  });
-
-  if (!tokenResponse.ok) {
-    const errorText = await tokenResponse.text();
-    throw new Error(`Failed to get Uber access token: ${tokenResponse.status} ${errorText}`);
-  }
-
-  const tokenData = await tokenResponse.json();
-  return tokenData.access_token;
-}

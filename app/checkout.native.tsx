@@ -85,7 +85,7 @@ interface Order {
   payment_status: 'pending' | 'processing' | 'succeeded' | 'failed' | 'canceled' | null;
   payment_id: string | null;
   order_number: number;
-  full_name: string | null;
+  customer_name: string | null;
   delivery_address: string | null;
   pickup_notes: string | null;
   delivery_provider: string | null;
