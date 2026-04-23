@@ -149,6 +149,7 @@ const MAPPING = ({
   "lock.fill": "lock",
   "lock.open.fill": "lock-open",
   "lock.rotation": "lock-reset",
+  "dot.radiowaves.left.and.right": "wifi-tethering",
 
   // Shopping & Commerce
   "cart.fill": "shopping-cart",

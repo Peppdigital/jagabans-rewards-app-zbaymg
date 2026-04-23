@@ -21,6 +21,8 @@ import { SUPABASE_URL, supabase } from '@/app/integrations/supabase/client';
 import { StripeProvider, useStripe } from '@stripe/stripe-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Linking from 'expo-linking';
+import {appConfigService} from '@/services/supabaseService';
+import { useAppConfig } from '@/hooks/useAppConfig';
 
 // ============================================================================
 // TYPES
@@ -125,7 +127,7 @@ const STRIPE_PUBLISHABLE_KEY =
 const GOOGLE_PLACES_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_PLACES_API_KEY || '';
 
 const POINTS_TO_DOLLAR_RATE = 0.01;
-const DISCOUNT_PERCENTAGE = 0.15;
+const DISCOUNT_PERCENTAGE = 0.10;
 
 const COUNTRY_CODES = [
   { code: '+1',   flag: '🇺🇸', label: 'United States (+1)' },
@@ -206,6 +208,14 @@ function CheckoutContent() {
   const [pickupNotes, setPickupNotes] = useState('');
   const [usePoints, setUsePoints] = useState(false);
   const [processing, setProcessing] = useState(false);
+  // App pricing config (loaded from Supabase)
+  // Replace with:
+const { config: appConfig, loading: configLoading } = useAppConfig();
+
+const appDiscountEnabled = appConfig.discount_enabled;
+const appDiscountPct     = appConfig.discount_percentage / 100;
+const appPointsEnabled   = appConfig.points_enabled;
+const appPointsRate      = appConfig.points_value_rate;
 
   // Address validation
   const [addressValidation, setAddressValidation] = useState<AddressValidationResult | null>(null);
@@ -257,28 +267,44 @@ function CheckoutContent() {
   }, [userProfile?.email, deliveryEmail]);
 
 
+  // Load live pricing config
+// useEffect(() => {
+//   appConfigService.getAppConfig().then(({ data }) => {
+//     if (data) {
+//       setAppDiscountEnabled(data.discount_enabled ?? true);
+//       setAppDiscountPct((data.discount_percentage ?? 10) / 100);
+//       setAppPointsEnabled(data.points_enabled ?? true);
+//       setAppPointsRate(data.points_value_rate ?? 0.01);
+//     }
+//     setConfigReady(true);
+//   });
+// }, []);
+
   // ── Computed values ───────────────────────────────────────────────────────
 
-  const availablePoints = userProfile?.points || 0;
-  const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  const discount = subtotal * DISCOUNT_PERCENTAGE;
-  const subtotalAfterDiscount = subtotal - discount;
-  const tax = subtotalAfterDiscount * 0.0975;
+const availablePoints = userProfile?.points || 0;
+const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
 
-  const pointsValueInDollars = availablePoints * POINTS_TO_DOLLAR_RATE;
-  const maxPointsDiscount = subtotalAfterDiscount * 0.2;
-  const pointsDiscount = usePoints ? Math.min(pointsValueInDollars, maxPointsDiscount) : 0;
+// Use live config values
+const discount = appDiscountEnabled ? subtotal * appDiscountPct : 0;
+const subtotalAfterDiscount = subtotal - discount;
+const tax = subtotalAfterDiscount * 0.0975;
 
-  // Use quoted fee when available, fallback flat rate otherwise (never 0 for delivery)
-  const deliveryFee =
-    orderType === 'delivery'
-      ? (deliveryQuote ? deliveryQuote.fee : FALLBACK_DELIVERY_FEE)
-      : 0;
-  const total = subtotalAfterDiscount + tax + deliveryFee - pointsDiscount;
+const pointsValueInDollars = availablePoints * appPointsRate;
+const maxPointsDiscount = subtotalAfterDiscount * 0.2;
+const pointsDiscount = (usePoints && appPointsEnabled)
+  ? Math.min(pointsValueInDollars, maxPointsDiscount)
+  : 0;
 
-  const pointsToEarn = Math.floor(
-    (subtotalAfterDiscount * POINTS_REWARD_PERCENTAGE) / POINTS_TO_DOLLAR_RATE
-  );
+const deliveryFee =
+  orderType === 'delivery'
+    ? (deliveryQuote ? deliveryQuote.fee : FALLBACK_DELIVERY_FEE)
+    : 0;
+const total = subtotalAfterDiscount + tax + deliveryFee - pointsDiscount;
+
+const pointsToEarn = appPointsEnabled
+  ? Math.floor((subtotalAfterDiscount * (appConfig.points_reward_percentage / 100)) / appPointsRate)
+  : 0;
 
   const isPhoneValid = phoneNumber.replace(/\D/g, '').length >= 7;
   const isEmailValid = EMAIL_REGEX.test(deliveryEmail.trim());
@@ -1177,7 +1203,7 @@ function CheckoutContent() {
             >
               <IconSymbol name="info" size={20} color={currentColors.primary} />
               <Text style={styles.infoText}>
-                Secure checkout powered by Stripe. Your payment information is encrypted and protected. Enjoy 15% off your order!
+                Secure checkout powered by Stripe. Your payment information is encrypted and protected. Enjoy {appDiscountPct * 100}% off your order!
               </Text>
             </LinearGradient>
 
@@ -1455,10 +1481,16 @@ function CheckoutContent() {
                 <Text style={styles.summaryLabel}>Subtotal</Text>
                 <Text style={styles.summaryValue}>${subtotal.toFixed(2)}</Text>
               </View>
-              <View style={styles.summaryRow}>
-                <Text style={[styles.summaryLabel, { color: currentColors.secondary }]}>Discount (15%)</Text>
-                <Text style={[styles.summaryValue, { color: currentColors.secondary }]}>-${discount.toFixed(2)}</Text>
-              </View>
+{appDiscountEnabled && discount > 0 && (
+  <View style={styles.summaryRow}>
+    <Text style={[styles.summaryLabel, { color: currentColors.secondary }]}>
+      Discount ({Math.round(appDiscountPct * 100)}%)
+    </Text>
+    <Text style={[styles.summaryValue, { color: currentColors.secondary }]}>
+      -${discount.toFixed(2)}
+    </Text>
+  </View>
+)}
               <View style={styles.summaryRow}>
                 <Text style={styles.summaryLabel}>Tax (9.75%)</Text>
                 <Text style={styles.summaryValue}>${tax.toFixed(2)}</Text>
@@ -1487,12 +1519,14 @@ function CheckoutContent() {
                 <Text style={styles.summaryValueTotal}>${total.toFixed(2)}</Text>
               </View>
 
-              <View style={styles.pointsEarnCard}>
-                <IconSymbol name="star" size={20} color={currentColors.highlight} />
-                <Text style={styles.pointsEarnText}>
-                  You'll earn {pointsToEarn} points with this order! (${(pointsToEarn * POINTS_TO_DOLLAR_RATE).toFixed(2)} value)
-                </Text>
-              </View>
+              {appPointsEnabled && pointsToEarn > 0 && (
+                <View style={styles.pointsEarnCard}>
+                  <IconSymbol name="star" size={20} color={currentColors.highlight} />
+                  <Text style={styles.pointsEarnText}>
+                    You'll earn {pointsToEarn} points with this order! (${(pointsToEarn * appPointsRate).toFixed(2)} value)
+                  </Text>
+                </View>
+               )}
             </LinearGradient>
 
           </View>

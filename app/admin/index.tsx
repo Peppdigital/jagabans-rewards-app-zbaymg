@@ -23,6 +23,7 @@ import { useApp } from "@/contexts/AppContext";
 import Dialog from "@/components/Dialog";
 import Toast from "@/components/Toast";
 import AsyncStorage from '@react-native-async-storage/async-storage';
+// import { useAppConfig } from "@/hooks/useAppConfig";
 
 // Constants for AsyncStorage keys
 const ADMIN_STORAGE_KEYS = {
@@ -49,9 +50,20 @@ export default function AdminDashboard() {
   const [viewAsAdmin, setViewAsAdmin] = useState(false);
 
   // Store hours config
-  const [hoursRestrictedEnabled, setHoursRestrictedEnabled] = useState(true);
-  const [storeManuallyClosedState, setStoreManuallyClosedState] = useState(false);
-  const [configLoading, setConfigLoading] = useState(false);
+//   const [hoursRestrictedEnabled, setHoursRestrictedEnabled] = useState(true);
+//   const [storeManuallyClosedState, setStoreManuallyClosedState] = useState(false);
+//   // Pricing config
+// const [discountEnabled, setDiscountEnabled] = useState(true);
+// const [discountPercentage, setDiscountPercentage] = useState(10); // stored as whole number e.g. 10 = 10%
+// const [discountInput, setDiscountInput] = useState('10');
+// const [pointsEnabled, setPointsEnabled] = useState(true);
+// const [pointsValueRate, setPointsValueRate] = useState(0.01); // dollars per point
+// const [pointsRateInput, setPointsRateInput] = useState('0.01');
+// const [pricingLoading, setPricingLoading] = useState(false);
+  // const [configLoading, setConfigLoading] = useState(false);
+  // const { config, loading: configLoading } = useAppConfig();  // ← replaces configLoading state too
+  const [pointsRewardPercentage, setPointsRewardPercentage] = useState(5);
+const [pointsRewardInput, setPointsRewardInput] = useState('5');
 
   // Dialog state
   const [dialogVisible, setDialogVisible] = useState(false);
@@ -235,45 +247,134 @@ export default function AdminDashboard() {
   };
 
   // Load app config when admin is authenticated
-  useEffect(() => {
-    if (isAuthenticated && isAdmin) {
-      appConfigService.getAppConfig().then(({ data }) => {
-        if (data) {
-          setHoursRestrictedEnabled(data.hours_restriction_enabled);
-          setStoreManuallyClosedState(data.store_manually_closed);
-        }
-      });
-    }
-  }, [isAuthenticated, isAdmin]);
+// Remove the manual useEffect that calls appConfigService.getAppConfig()
+// Add at the top of the component alongside other hooks:
 
-  const handleToggleHoursRestricted = async (value: boolean) => {
-    setHoursRestrictedEnabled(value);
-    if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setConfigLoading(true);
-    const { error } = await appConfigService.updateAppConfig({ hours_restriction_enabled: value });
-    setConfigLoading(false);
-    if (error) {
-      setHoursRestrictedEnabled(!value); // revert
-      showToast('error', 'Failed to update hours setting');
-    } else {
-      showToast('success', value ? 'Operating hours enabled' : 'Store set to always open');
-    }
-  };
 
-  const handleToggleStoreManuallyClosedState = async (value: boolean) => {
-    setStoreManuallyClosedState(value);
-    if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setConfigLoading(true);
-    const { error } = await appConfigService.updateAppConfig({ store_manually_closed: value });
-    setConfigLoading(false);
-    if (error) {
-      setStoreManuallyClosedState(!value); // revert
-      showToast('error', 'Failed to update store status');
-    } else {
-      showToast('success', value ? 'Store manually closed' : 'Store reopened');
-    }
-  };
+// Sync local toggle/input state whenever config updates from realtime
+// useEffect(() => {
+//   setHoursRestrictedEnabled(config.hours_restriction_enabled);
+//   setStoreManuallyClosedState(config.store_manually_closed);
+//   setDiscountEnabled(config.discount_enabled);
+//   setDiscountPercentage(config.discount_percentage);
+//   setDiscountInput(String(config.discount_percentage));
+//   setPointsEnabled(config.points_enabled);
+//   setPointsValueRate(config.points_value_rate);
+//   setPointsRateInput(String(config.points_value_rate));
+//     setPointsRewardPercentage(config.points_reward_percentage);   // ← add
+//   setPointsRewardInput(String(config.points_reward_percentage)); // ← add
+// }, [config]);
 
+//   const handleToggleHoursRestricted = async (value: boolean) => {
+//   if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+//   const { error } = await appConfigService.updateAppConfig({ hours_restriction_enabled: value });
+//   if (error) {
+//     showToast('error', 'Failed to update hours setting');
+//   } else {
+//     showToast('success', value ? 'Operating hours enabled' : 'Store set to always open');
+//   }
+// };
+
+// const handleToggleStoreManuallyClosedState = async (value: boolean) => {
+//   if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+//   const { error } = await appConfigService.updateAppConfig({ store_manually_closed: value });
+//   if (error) {
+//     showToast('error', 'Failed to update store status');
+//   } else {
+//     showToast('success', value ? 'Store manually closed' : 'Store reopened');
+//   }
+// };
+
+//   const handleToggleDiscountEnabled = async (value: boolean) => {
+//   setDiscountEnabled(value);
+//   if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+//   setPricingLoading(true);
+//   const { error } = await appConfigService.updateAppConfig({ discount_enabled: value });
+//   setPricingLoading(false);
+//   if (error) {
+//     setDiscountEnabled(!value);
+//     showToast('error', 'Failed to update discount setting');
+//   } else {
+//     showToast('success', value ? 'Discount enabled' : 'Discount disabled');
+//   }
+// };
+
+// const handleSaveDiscountPercentage = async () => {
+//   const parsed = parseFloat(discountInput);
+//   if (isNaN(parsed) || parsed < 0 || parsed > 100) {
+//     showToast('error', 'Enter a valid percentage between 0 and 100');
+//     setDiscountInput(String(discountPercentage));
+//     return;
+//   }
+//   const rounded = Math.round(parsed * 100) / 100;
+//   setPricingLoading(true);
+//   const { error } = await appConfigService.updateAppConfig({ discount_percentage: rounded });
+//   setPricingLoading(false);
+//   if (error) {
+//     showToast('error', 'Failed to save discount percentage');
+//     setDiscountInput(String(discountPercentage));
+//   } else {
+//     setDiscountPercentage(rounded);
+//     setDiscountInput(String(rounded));
+//     showToast('success', `Discount set to ${rounded}%`);
+//   }
+// };
+
+// const handleTogglePointsEnabled = async (value: boolean) => {
+//   setPointsEnabled(value);
+//   if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+//   setPricingLoading(true);
+//   const { error } = await appConfigService.updateAppConfig({ points_enabled: value });
+//   setPricingLoading(false);
+//   if (error) {
+//     setPointsEnabled(!value);
+//     showToast('error', 'Failed to update points setting');
+//   } else {
+//     showToast('success', value ? 'Points system enabled' : 'Points system disabled');
+//   }
+// };
+
+// const handleSavePointsValueRate = async () => {
+//   const parsed = parseFloat(pointsRateInput);
+//   if (isNaN(parsed) || parsed < 0 || parsed > 1) {
+//     showToast('error', 'Enter a value between 0 and 1 (e.g. 0.01 = $0.01 per point)');
+//     setPointsRateInput(String(pointsValueRate));
+//     return;
+//   }
+//   const rounded = Math.round(parsed * 10000) / 10000;
+//   setPricingLoading(true);
+//   const { error } = await appConfigService.updateAppConfig({ points_value_rate: rounded });
+//   setPricingLoading(false);
+//   if (error) {
+//     showToast('error', 'Failed to save points value');
+//     setPointsRateInput(String(pointsValueRate));
+//   } else {
+//     setPointsValueRate(rounded);
+//     setPointsRateInput(String(rounded));
+//     showToast('success', `Points value set to $${rounded} per point`);
+//   }
+// };
+
+// const handleSavePointsRewardPercentage = async () => {
+//   const parsed = parseFloat(pointsRewardInput);
+//   if (isNaN(parsed) || parsed < 0 || parsed > 100) {
+//     showToast('error', 'Enter a valid percentage between 0 and 100');
+//     setPointsRewardInput(String(pointsRewardPercentage));
+//     return;
+//   }
+//   const rounded = Math.round(parsed * 100) / 100;
+//   setPricingLoading(true);
+//   const { error } = await appConfigService.updateAppConfig({ points_reward_percentage: rounded });
+//   setPricingLoading(false);
+//   if (error) {
+//     showToast('error', 'Failed to save points reward percentage');
+//     setPointsRewardInput(String(pointsRewardPercentage));
+//   } else {
+//     setPointsRewardPercentage(rounded);
+//     setPointsRewardInput(String(rounded));
+//     showToast('success', `Points reward set to ${rounded}%`);
+//   }
+// };
   const fetchStats = useCallback(async () => {
     try {
       setStatsLoading(true);
@@ -343,6 +444,15 @@ export default function AdminDashboard() {
     color: "#FF6B35",
     superAdminOnly: false,
   },
+  {
+  id: "store-settings",
+  title: "Store Settings",
+  description: "Hours, discounts & points controls",
+  icon: "gearshape.fill" as const,
+  route: "/admin/store-settings",
+  color: "#2ECC71",
+  superAdminOnly: false,
+},
   {
     id: "reservations",
     title: "Reservations",
@@ -704,59 +814,7 @@ export default function AdminDashboard() {
         )}
 
         {/* Store Hours Controls */}
-        <View style={styles.storeControlsContainer}>
-          <View style={styles.storeControlsHeader}>
-            <IconSymbol
-              name={Platform.OS === 'ios' ? "clock.fill" : "schedule"}
-              size={18}
-              color={colors.primary}
-            />
-            <Text style={styles.storeControlsTitle}>Store Hours Controls</Text>
-            {configLoading && <ActivityIndicator size="small" color={colors.primary} style={{ marginLeft: 8 }} />}
-          </View>
-
-          {/* hours_restriction_enabled toggle */}
-          <View style={styles.storeControlRow}>
-            <View style={styles.storeControlLeft}>
-              <Text style={styles.storeControlLabel}>Use Operating Hours</Text>
-              <Text style={styles.storeControlHint}>
-                {hoursRestrictedEnabled
-                  ? 'Ordering follows scheduled hours'
-                  : 'Store is always open for ordering'}
-              </Text>
-            </View>
-            <Switch
-              value={hoursRestrictedEnabled}
-              onValueChange={handleToggleHoursRestricted}
-              trackColor={{ false: colors.border, true: colors.primary }}
-              thumbColor="#FFFFFF"
-              ios_backgroundColor={colors.border}
-              disabled={configLoading}
-            />
-          </View>
-
-          <View style={styles.storeControlDivider} />
-
-          {/* store_manually_closed toggle */}
-          <View style={styles.storeControlRow}>
-            <View style={styles.storeControlLeft}>
-              <Text style={styles.storeControlLabel}>Manually Close Store</Text>
-              <Text style={[styles.storeControlHint, storeManuallyClosedState && styles.storeControlHintDanger]}>
-                {storeManuallyClosedState
-                  ? 'Store is closed — overrides all hours settings'
-                  : 'Store is open (no manual override)'}
-              </Text>
-            </View>
-            <Switch
-              value={storeManuallyClosedState}
-              onValueChange={handleToggleStoreManuallyClosedState}
-              trackColor={{ false: colors.border, true: '#E74C3C' }}
-              thumbColor="#FFFFFF"
-              ios_backgroundColor={colors.border}
-              disabled={configLoading}
-            />
-          </View>
-        </View>
+        
 
         {shouldShowAnalytics && (
           <View style={styles.statsContainer}>
@@ -1218,4 +1276,34 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     textAlign: "center",
   },
+  pricingInputRow: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  marginTop: 12,
+},
+pricingInputLabel: {
+  fontSize: 14,
+  color: colors.textSecondary,
+  fontWeight: '500',
+},
+pricingInputGroup: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  gap: 4,
+},
+pricingInput: {
+  width: 80,
+  borderWidth: 1,
+  borderRadius: 8,
+  paddingHorizontal: 10,
+  paddingVertical: 6,
+  fontSize: 15,
+  fontWeight: '600',
+  textAlign: 'center',
+},
+pricingInputSuffix: {
+  fontSize: 15,
+  fontWeight: '600',
+},
 });

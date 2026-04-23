@@ -1876,6 +1876,11 @@ export const imageService = {
 export interface AppConfig {
   hours_restriction_enabled: boolean;
   store_manually_closed: boolean;
+  discount_enabled: boolean;
+  discount_percentage: number;
+  points_enabled: boolean;
+  points_value_rate: number;
+  points_reward_percentage: number; // % of subtotal earned as points, e.g. 5 = 5%
 }
 
 export const appConfigService = {
@@ -1884,17 +1889,40 @@ export const appConfigService = {
       const { data, error } = await supabase
         .from('app_config' as any)
         .select('key, value')
-        .in('key', ['hours_restriction_enabled', 'store_manually_closed']);
+        .in('key', [
+          'hours_restriction_enabled',
+          'store_manually_closed',
+          'discount_enabled',
+          'discount_percentage',
+          'points_enabled',
+          'points_value_rate',
+          'points_reward_percentage', // ← add
+        ]);
       if (error) throw error;
+
       const rows: { key: string; value: string }[] = data ?? [];
-      const get = (key: string, fallback: boolean) => {
+
+      const getBool = (key: string, fallback: boolean) => {
         const row = rows.find((r) => r.key === key);
         return row ? row.value === 'true' : fallback;
       };
+
+      const getNum = (key: string, fallback: number) => {
+        const row = rows.find((r) => r.key === key);
+        if (!row) return fallback;
+        const parsed = parseFloat(row.value);
+        return isNaN(parsed) ? fallback : parsed;
+      };
+
       return {
         data: {
-          hours_restriction_enabled: get('hours_restriction_enabled', true),
-          store_manually_closed: get('store_manually_closed', false),
+          hours_restriction_enabled: getBool('hours_restriction_enabled', true),
+          store_manually_closed:     getBool('store_manually_closed', false),
+          discount_enabled:          getBool('discount_enabled', true),
+          discount_percentage:       getNum('discount_percentage', 10),
+          points_enabled:            getBool('points_enabled', true),
+          points_value_rate:         getNum('points_value_rate', 0.01),
+          points_reward_percentage: getNum('points_reward_percentage', 5),
         },
         error: null,
       };
