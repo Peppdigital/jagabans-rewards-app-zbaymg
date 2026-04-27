@@ -18,9 +18,8 @@ import { IconSymbol } from '@/components/IconSymbol';
 import * as Haptics from 'expo-haptics';
 import Toast from '@/components/Toast';
 import { SUPABASE_URL, supabase } from '@/app/integrations/supabase/client';
-import { StripeProvider, useStripe } from '@stripe/stripe-react-native';
+import { SQIPCore, SQIPCardEntry, type CardDetails } from 'react-native-square-in-app-payments';
 import { LinearGradient } from 'expo-linear-gradient';
-import * as Linking from 'expo-linking';
 import {appConfigService} from '@/services/supabaseService';
 import { useAppConfig } from '@/hooks/useAppConfig';
 
@@ -119,9 +118,6 @@ interface Order {
 // CONSTANTS
 // ============================================================================
 
-const STRIPE_PUBLISHABLE_KEY =
-  process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY ||
-  '';
 
 // Replace with your actual Google Places API key
 const GOOGLE_PLACES_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_PLACES_API_KEY || '';
@@ -192,7 +188,7 @@ function CheckoutContent() {
     loadUserProfile,
   } = useApp();
 
-  const { initPaymentSheet, presentPaymentSheet } = useStripe();
+  const [squareInitialized, setSquareInitialized] = useState(false);
 
   // ── State ─────────────────────────────────────────────────────────────────
 
@@ -605,165 +601,147 @@ const pointsToEarn = appPointsEnabled
     return () => setTabBarVisible(true);
   }, [setTabBarVisible]);
 
-  // ── Payment sheet ─────────────────────────────────────────────────────────
+  // ── Square SDK initialization ─────────────────────────────────────────────
 
-  const initializePaymentSheet = useCallback(async () => {
-  if (!userProfile) throw new Error('User profile not found');
-
-  const { data: { session } } = await supabase.auth.getSession();
-  if (!session) throw new Error('Not authenticated');
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('User not found');
-
-  const { data: customerData } = await supabase
-    .from('user_profiles')
-    .select('stripe_customer_id')
-    .eq('user_id', user.id)
-    .single<{ stripe_customer_id: string | null }>();
-
-  let customerId = customerData?.stripe_customer_id;
-
-  if (!customerId) {
-    const res = await fetch(`${SUPABASE_URL}/functions/v1/create-stripe-customer`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-      body: JSON.stringify({ email: userProfile?.email || user.email, name: userProfile?.name }),
-    });
-    if (!res.ok) throw new Error('Failed to create Stripe customer');
-    const { customerId: newId } = await res.json();
-    customerId = newId;
-  }
-
-  if (orderType === 'delivery' && deliveryQuote && isQuoteExpired()) {
-    const addr = validatedAddress || deliveryAddress;
-    if (addr) await fetchDeliveryQuote(addr, validatedUberAddress || undefined);
-  }
-
-  const pointsUsed = usePoints ? Math.floor(pointsDiscount / POINTS_TO_DOLLAR_RATE) : 0;
-  const orderItems = cart.map((item) => ({
-    id: item.id, name: item.name, price: item.price, quantity: item.quantity,
-  }));
-
-  // ── Full order snapshot — goes to pending_orders, NOT Stripe metadata ──
-  const pendingOrderPayload = {
-    order_type: orderType,
-    delivery_address: orderType === 'delivery' ? (validatedAddress || deliveryAddress) : '',
-    delivery_address_uber: orderType === 'delivery' ? (validatedUberAddress || '') : '',
-    pickup_notes: pickupNotes || '',
-    items: orderItems,           // full objects, no JSON.stringify needed
-    subtotal: subtotal,
-    tax: tax,
-    delivery_fee: deliveryFee,
-    total: total,
-    discount: discount,
-    points_earned: pointsToEarn,
-    points_used: pointsUsed,
-    points_discount: pointsDiscount,
-    customer_name: userProfile?.name || '',
-    customer_email: (orderType === 'delivery' ? deliveryEmail : userProfile?.email) || user.email || '',
-    customer_phone: orderType === 'delivery'
-      ? `${phoneCountryCode}${phoneNumber}`
-      : (userProfile?.phone || ''),
-    uber_quote_id: deliveryQuote?.quoteId || '',
-  };
-
-  const response = await fetch(`${SUPABASE_URL}/functions/v1/create-payment-intent`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-    body: JSON.stringify({
-      amount: Math.round(total * 100),
-      currency: 'usd',
-      customerId,
-      setupFutureUsage: 'off_session',
-      pendingOrder: pendingOrderPayload,  // ← replaces the old metadata blob
-    }),
-  });
-
-  if (!response.ok) throw new Error('Failed to create payment intent');
-  return response.json();
-}, [
-  total, orderType, cart, userProfile, validatedAddress, deliveryAddress, validatedUberAddress, pickupNotes,
-  subtotal, tax, discount, deliveryFee, pointsToEarn, usePoints, pointsDiscount,
-  deliveryQuote, isQuoteExpired, fetchDeliveryQuote, deliveryEmail, phoneCountryCode, phoneNumber,
-]);
-
-  // ── Order polling ─────────────────────────────────────────────────────────
-
-  const waitForOrderCreation = useCallback(async (paymentIntentId: string): Promise<string> => {
-    for (let attempt = 0; attempt < 30; attempt++) {
-      const { data: order } = await supabase
-        .from('orders')
-        .select('id, order_type')
-        .eq('payment_id', paymentIntentId)
-        .maybeSingle<Order>();
-
-      if (order?.id) return order.id;
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+  useEffect(() => {
+    const appId = process.env.EXPO_PUBLIC_SQUARE_APPLICATION_ID;
+    if (!appId) {
+      console.warn('[Square Init] EXPO_PUBLIC_SQUARE_APPLICATION_ID is not set.');
+      return;
     }
-    throw new Error(
-      'Order creation timed out. Your payment was successful. Contact support with payment ID: ' +
-        paymentIntentId
-    );
+    try {
+      SQIPCore.setSquareApplicationId(appId);
+      setSquareInitialized(true);
+      console.log('[Square Init] Initialized successfully.');
+    } catch (err) {
+      console.error('[Square Init] Native module not available — a native rebuild is required:', err);
+    }
   }, []);
 
   // ── Order placement ───────────────────────────────────────────────────────
 
   const proceedWithPayment = useCallback(async () => {
-    setProcessing(true);
-    try {
-      const paymentData = await initializePaymentSheet();
-      if (!paymentData) throw new Error('Failed to initialize payment');
-
-      const { clientSecret, ephemeralKey, paymentIntentId, customerId } = paymentData;
-      const returnURL = Linking.createURL('checkout');
-
-      const initConfig: any = {
-        merchantDisplayName: 'Jagabans LA',
-        paymentIntentClientSecret: clientSecret,
-        allowsDelayedPaymentMethods: false,
-        returnURL,
-        defaultBillingDetails: { name: userProfile?.name, email: userProfile?.email },
-        googlePay: { merchantCountryCode: 'US', testEnv: false, currencyCode: 'usd' },
-      };
-
-      if (customerId && ephemeralKey) {
-        initConfig.customerId = customerId;
-        initConfig.customerEphemeralKeySecret = ephemeralKey;
-      }
-
-      const { error: initError } = await initPaymentSheet(initConfig);
-      if (initError) throw new Error(initError.message);
-
-      const { error: presentError } = await presentPaymentSheet();
-      if (presentError) {
-        if (presentError.code === 'Canceled') {
-          showToast('info', 'Payment cancelled');
-          setProcessing(false);
-          return;
-        }
-        throw new Error(presentError.message);
-      }
-
-      showToast('success', 'Payment successful! Creating your order...');
-
-      const orderId = await waitForOrderCreation(paymentIntentId);
-
-      clearCart();
-      await loadUserProfile();
-
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setTimeout(() => {
-        setProcessing(false);
-        router.push({ pathname: '/order-confirmation', params: { orderId } });
-      }, 100);
-    } catch (error) {
-      showToast('error', error instanceof Error ? error.message : 'Failed to place order. Please try again.');
-      setProcessing(false);
+    if (!squareInitialized) {
+      showToast('error', 'Payment system not ready. Please try again.');
+      return;
     }
+
+    if (orderType === 'delivery' && deliveryQuote && isQuoteExpired()) {
+      const addr = validatedAddress || deliveryAddress;
+      if (addr) await fetchDeliveryQuote(addr, validatedUberAddress || undefined);
+    }
+
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      showToast('error', 'Please sign in to continue.');
+      return;
+    }
+
+    // Capture all values before opening the card sheet
+    const customerEmail = (orderType === 'delivery' ? deliveryEmail : userProfile?.email) || '';
+    const customerPhone = orderType === 'delivery'
+      ? `${phoneCountryCode}${phoneNumber}`
+      : (userProfile?.phone || '');
+    const deliveryAddrFull = validatedAddress || deliveryAddress;
+
+    let addressCity = '', addressState = '', addressZip = '';
+    if (validatedUberAddress) {
+      try {
+        const ua = JSON.parse(validatedUberAddress);
+        addressCity  = ua.city      || '';
+        addressState = ua.state     || '';
+        addressZip   = ua.zip_code  || '';
+      } catch { /* fallback to empty strings */ }
+    }
+
+    const paymentBody = {
+      amount:       Math.round(total * 100),
+      subtotal:     Math.round(subtotal * 100),
+      taxAmount:    Math.round(tax * 100),
+      currency:     'USD',
+      customer: {
+        name:         userProfile?.name || '',
+        email:        customerEmail,
+        phone:        customerPhone,
+        deliveryType: orderType,
+        ...(orderType === 'delivery' ? {
+          address: deliveryAddrFull,
+          city:    addressCity,
+          state:   addressState,
+          zip:     addressZip,
+          deliveryInstructions: pickupNotes || undefined,
+        } : {
+          pickupDate: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }),
+          pickupTime: 'ASAP',
+        }),
+      },
+      items: cart.map((item) => ({
+        id:       String(item.id),
+        name:     item.name,
+        quantity: item.quantity,
+        price:    item.price,
+      })),
+      orderType,
+      deliveryAddress: orderType === 'delivery' ? deliveryAddrFull : undefined,
+      pickupNotes:     orderType === 'pickup' ? (pickupNotes || undefined) : undefined,
+      deliveryQuoteId: deliveryQuote?.quoteId || null,
+      deliveryFee,
+      deliveryFeeCents: Math.round(deliveryFee * 100),
+    };
+
+    setProcessing(true);
+
+    // The modern SDK API: async callback returns { success, errorMessage?, onCardEntryComplete? }
+    SQIPCardEntry.startCardEntryFlow(
+      false, // collectPostalCode
+      async (cardDetails) => {
+        try {
+          const response = await fetch(`${SUPABASE_URL}/functions/v1/process-square-payment`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${session.access_token}`,
+            },
+            body: JSON.stringify({ sourceId: cardDetails.nonce, ...paymentBody }),
+          });
+
+          if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            return { success: false, errorMessage: (errData as any).error || `Payment failed (${response.status})` };
+          }
+
+          const data = await response.json();
+          if (!data.success) {
+            return { success: false, errorMessage: data.error || 'Payment processing failed' };
+          }
+
+          return {
+            success: true,
+            onCardEntryComplete: () => {
+              showToast('success', 'Payment successful!');
+              clearCart();
+              loadUserProfile();
+              Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+              setTimeout(() => {
+                setProcessing(false);
+                router.push({ pathname: '/order-confirmation', params: { orderId: data.orderId } });
+              }, 100);
+            },
+          };
+        } catch (error) {
+          return { success: false, errorMessage: error instanceof Error ? error.message : 'Payment failed' };
+        }
+      },
+      () => {
+        // User cancelled card entry
+        setProcessing(false);
+      }
+    );
   }, [
-    initializePaymentSheet, initPaymentSheet, presentPaymentSheet,
-    waitForOrderCreation, clearCart, loadUserProfile, router, showToast, userProfile,
+    squareInitialized, orderType, cart, userProfile, validatedAddress, deliveryAddress,
+    validatedUberAddress, pickupNotes, subtotal, tax, total, deliveryFee,
+    deliveryQuote, isQuoteExpired, fetchDeliveryQuote,
+    deliveryEmail, phoneCountryCode, phoneNumber, showToast, clearCart, loadUserProfile, router,
   ]);
 
   const handlePlaceOrder = useCallback(async () => {
@@ -1585,9 +1563,5 @@ const pointsToEarn = appPointsEnabled
 // ============================================================================
 
 export default function CheckoutScreen() {
-  return (
-    <StripeProvider publishableKey={STRIPE_PUBLISHABLE_KEY}>
-      <CheckoutContent />
-    </StripeProvider>
-  );
+  return <CheckoutContent />;
 }

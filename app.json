@@ -33,8 +33,16 @@
       "expo-font",
       "expo-router",
       "expo-web-browser",
-      "expo-build-properties",
-      "expo-sharing"
+      ["expo-build-properties", {
+        "android": {
+          "minSdkVersion": 28
+        }
+      }],
+      "expo-sharing",
+      ["react-native-square-in-app-payments", {
+        "iosScheme": "jagabansla",
+        "androidScheme": "jagabansla"
+      }]
     ],
     "scheme": "jagabansla",
     "experiments": {
