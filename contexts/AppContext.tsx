@@ -60,6 +60,7 @@ interface AppContextType {
   loadMenuItems: () => Promise<void>;
   getUnreadNotificationCount: () => number;
   orderingStatus: OrderingStatus;
+  appConfig: AppConfig;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -84,6 +85,11 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   const [appConfig, setAppConfig] = useState<AppConfig>({
     hours_restriction_enabled: true,
     store_manually_closed: false,
+    discount_enabled: true,
+    discount_percentage: 10,
+    points_enabled: true,
+    points_value_rate: 0.01,
+    points_reward_percentage: 5,
   });
 
   const loadMenuItems = useCallback(async () => {
@@ -256,13 +262,23 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     }
   }, [user]);
   
+  // Keep a stable ref so subscription callbacks always call the latest version
+  // without needing loadUserProfile in the subscription's dependency array.
+  const loadUserProfileRef = useRef(loadUserProfile);
+  useEffect(() => { loadUserProfileRef.current = loadUserProfile; });
+
   // Initialize notification sound settings on app startup
   useEffect(() => {
     configureNotificationSound();
   }, []);
 
-  // Load menu items when the app starts (in useEffect):
+  // Guard prevents the double-invocation that React Strict Mode causes in dev.
+  // The ref persists across the simulated mount/unmount cycle, so only the
+  // second (real) mount fires the actual load.
+  const menuLoadedRef = useRef(false);
   useEffect(() => {
+    if (menuLoadedRef.current) return;
+    menuLoadedRef.current = true;
     loadMenuItems();
   }, [loadMenuItems]);
 
@@ -348,24 +364,23 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         .on('broadcast', { event: 'INSERT' }, (payload) => {
           console.log('New order created:', payload);
           showToast('New order placed!', 'success');
-          loadUserProfile(); // Reload profile to get updated orders
+          loadUserProfileRef.current();
         })
         .on('broadcast', { event: 'UPDATE' }, (payload) => {
           console.log('Order updated:', payload);
           const order = payload.new as any;
           showToast(`Order status updated to: ${order.status}`, 'info');
-          
-          // Play sound notification when order status changes to "ready"
+
           if (order.status === 'ready') {
             console.log('Order is ready! Playing notification sound');
             playOrderReadySound();
           }
-          
-          loadUserProfile(); // Reload profile to get updated orders
+
+          loadUserProfileRef.current();
         })
         .on('broadcast', { event: 'DELETE' }, (payload) => {
           console.log('Order deleted:', payload);
-          loadUserProfile(); // Reload profile to get updated orders
+          loadUserProfileRef.current();
         })
         .subscribe((status, err) => {
           console.log('Order subscription status:', status);
@@ -384,7 +399,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         orderChannelRef.current = null;
       }
     };
-  }, [isAuthenticated, user, loadUserProfile]);
+  }, [isAuthenticated, user]);
 
   // Get current colors based on theme settings
   const getCurrentColors = () => {
@@ -879,6 +894,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         loadMenuItems,
         getUnreadNotificationCount,
         orderingStatus,
+        appConfig,
       }}
     >
       {children}

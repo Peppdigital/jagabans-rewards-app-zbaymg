@@ -22,19 +22,22 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Get initial session
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      console.log('Initial session:', session?.user?.email);
-      setSession(session);
-      setUser(session?.user ?? null);
-      setLoading(false);
-    });
-
-    // Listen for auth changes
+    // onAuthStateChange fires INITIAL_SESSION on mount, making getSession() redundant.
+    // Using a functional update for user avoids creating a new object reference when
+    // the same user is already set (e.g. TOKEN_REFRESHED for the same user).
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       console.log('Auth state changed:', _event, session?.user?.email);
+      if (_event === 'INITIAL_SESSION') {
+        console.log('Initial session:', session?.user?.email);
+      }
       setSession(session);
-      setUser(session?.user ?? null);
+      setUser(prev => {
+        const next = session?.user ?? null;
+        // Keep the same reference if the user ID hasn't changed to prevent
+        // unnecessary downstream re-renders from unstable object identity.
+        if (next?.id === prev?.id) return prev;
+        return next;
+      });
       setLoading(false);
     });
 

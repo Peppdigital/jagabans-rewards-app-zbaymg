@@ -48,7 +48,7 @@ export default function TabLayout() {
     <Tabs
       screenOptions={{
         headerShown: false,
-        contentStyle: { backgroundColor: colors.background },
+        sceneStyle: { backgroundColor: colors.background },
       }}
       tabBar={() => <FloatingTabBar tabs={tabs} />}
     >
