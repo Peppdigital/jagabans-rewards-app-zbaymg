@@ -23,6 +23,11 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as Linking from 'expo-linking';
 import {appConfigService} from '@/services/supabaseService';
 import { useAppConfig } from '@/hooks/useAppConfig';
+import {
+  COUNTRY_CODES,
+  parseStoredPhone,
+  EMAIL_REGEX,
+} from '@/utils/checkoutUtils';
 
 // ============================================================================
 // TYPES
@@ -128,51 +133,6 @@ const GOOGLE_PLACES_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_PLACES_API_KEY || '
 
 const POINTS_TO_DOLLAR_RATE = 0.01;
 const DISCOUNT_PERCENTAGE = 0.10;
-
-const COUNTRY_CODES = [
-  { code: '+1',   flag: '🇺🇸', label: 'United States (+1)' },
-  { code: '+1',   flag: '🇨🇦', label: 'Canada (+1)' },
-  { code: '+44',  flag: '🇬🇧', label: 'United Kingdom (+44)' },
-  { code: '+234', flag: '🇳🇬', label: 'Nigeria (+234)' },
-  { code: '+233', flag: '🇬🇭', label: 'Ghana (+233)' },
-  { code: '+27',  flag: '🇿🇦', label: 'South Africa (+27)' },
-  { code: '+254', flag: '🇰🇪', label: 'Kenya (+254)' },
-  { code: '+251', flag: '🇪🇹', label: 'Ethiopia (+251)' },
-  { code: '+225', flag: '🇨🇮', label: "Côte d'Ivoire (+225)" },
-  { code: '+212', flag: '🇲🇦', label: 'Morocco (+212)' },
-  { code: '+20',  flag: '🇪🇬', label: 'Egypt (+20)' },
-  { code: '+61',  flag: '🇦🇺', label: 'Australia (+61)' },
-  { code: '+91',  flag: '🇮🇳', label: 'India (+91)' },
-  { code: '+49',  flag: '🇩🇪', label: 'Germany (+49)' },
-  { code: '+33',  flag: '🇫🇷', label: 'France (+33)' },
-  { code: '+34',  flag: '🇪🇸', label: 'Spain (+34)' },
-  { code: '+39',  flag: '🇮🇹', label: 'Italy (+39)' },
-  { code: '+31',  flag: '🇳🇱', label: 'Netherlands (+31)' },
-  { code: '+46',  flag: '🇸🇪', label: 'Sweden (+46)' },
-  { code: '+47',  flag: '🇳🇴', label: 'Norway (+47)' },
-  { code: '+55',  flag: '🇧🇷', label: 'Brazil (+55)' },
-  { code: '+52',  flag: '🇲🇽', label: 'Mexico (+52)' },
-  { code: '+81',  flag: '🇯🇵', label: 'Japan (+81)' },
-  { code: '+82',  flag: '🇰🇷', label: 'South Korea (+82)' },
-  { code: '+86',  flag: '🇨🇳', label: 'China (+86)' },
-  { code: '+971', flag: '🇦🇪', label: 'UAE (+971)' },
-  { code: '+966', flag: '🇸🇦', label: 'Saudi Arabia (+966)' },
-  { code: '+65',  flag: '🇸🇬', label: 'Singapore (+65)' },
-];
-
-/** Split a stored E.164-style phone into country code + local digits. */
-function parseStoredPhone(phone: string): { code: string; number: string } {
-  if (!phone) return { code: '+1', number: '' };
-  const sorted = COUNTRY_CODES.map(c => c.code).sort((a, b) => b.length - a.length);
-  for (const code of sorted) {
-    if (phone.startsWith(code)) {
-      return { code, number: phone.slice(code.length).replace(/\D/g, '') };
-    }
-  }
-  return { code: '+1', number: phone.replace(/\D/g, '') };
-}
-
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const POINTS_REWARD_PERCENTAGE = 0.05;
 const QUOTE_REFRESH_BUFFER_MS = 60_000;
 const FALLBACK_DELIVERY_FEE = 19.99; // applied when Uber quote is unavailable

@@ -1,10 +1,8 @@
-
-import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.3';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-provider, x-provider-event-id',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
@@ -27,13 +25,104 @@ interface OrderEmailData {
   timestamp: string;
 }
 
-serve(async (req) => {
-  // Handle CORS preflight requests
-  if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders, status: 200 });
+// Create Supabase client with service role
+const supabase = createClient(
+  Deno.env.get('SUPABASE_URL')!,
+  Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+);
+
+// Helper: insert idempotency row; returns true if inserted, false if already exists
+async function tryInsertWebhookEvent(provider: string, eventId: string, orderId?: string) {
+  try {
+    const payload: any = {
+      provider,
+      event_id: eventId,
+      received_at: new Date().toISOString(),
+      status: 'processing',
+    };
+    if (orderId) payload.order_id = orderId;
+
+    const { error, data } = await supabase
+      .from('webhook_events')
+      .insert(payload);
+
+    if (error) {
+      const isConflict = String(error.message).toLowerCase().includes('duplicate') || String(error.code) === '23505';
+      if (isConflict) {
+        console.info('[Idempotency] Duplicate event detected:', { provider, eventId, orderId });
+        return false;
+      }
+      console.error('[Idempotency] Insert error:', error);
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    console.error('[Idempotency] Unexpected error:', String(err));
+    return false;
+  }
+}
+
+// Helper: mark event as processed
+async function markWebhookEventProcessed(provider: string, eventId: string, result: any, status = 'processed') {
+  try {
+    const { error } = await supabase
+      .from('webhook_events')
+      .update({
+        processed_at: new Date().toISOString(),
+        status,
+        result,
+      })
+      .eq('provider', provider)
+      .eq('event_id', eventId);
+
+    if (error) {
+      console.warn('[Idempotency] Failed to mark processed:', error);
+    }
+  } catch (err) {
+    console.warn('[Idempotency] Failed to mark processed (exception):', String(err));
+  }
+}
+
+// Helper: send email via Resend
+async function sendResendEmail(to: string[] | string, subject: string, html: string) {
+  const resendApiKey = Deno.env.get('RESEND_API_KEY');
+  if (!resendApiKey) throw new Error('RESEND_API_KEY not set');
+
+  const from = Deno.env.get('SMTP_FROM') || 'orders@jagabansla.com';
+
+  const resp = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${resendApiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from,
+      to,
+      subject,
+      html,
+    }),
+  });
+
+  const txt = await resp.text();
+  let json;
+  try { json = JSON.parse(txt); } catch { json = { raw: txt }; }
+
+  if (!resp.ok) {
+    const err = new Error(`Resend API error: ${JSON.stringify(json)}`);
+    (err as any).status = resp.status;
+    throw err;
   }
 
-  // Only accept POST requests
+  return json;
+}
+
+Deno.serve(async (req: Request) => {
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders });
+  }
+
   if (req.method !== 'POST') {
     return new Response(
       JSON.stringify({ error: 'Method not allowed' }),
@@ -41,142 +130,83 @@ serve(async (req) => {
     );
   }
 
-  console.log('=== Send Order Confirmation Email Request ===');
+  console.log('[Admin Email] Request received');
 
+  const provider = req.headers.get('x-provider') ?? 'stripe-webhook';
+  const providerEventId = req.headers.get('x-provider-event-id') ?? null;
+
+  let orderData: OrderEmailData;
   try {
-    // Get Supabase client
-    const supabaseUrl = Deno.env.get('SUPABASE_URL');
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-    
-    if (!supabaseUrl || !supabaseServiceKey) {
-      console.error('Supabase configuration missing');
-      return new Response(
-        JSON.stringify({ error: 'Server configuration error' }),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
+    orderData = await req.json();
+  } catch (err) {
+    console.error('[Admin Email] Invalid JSON:', String(err));
+    return new Response(
+      JSON.stringify({ error: 'Invalid JSON' }),
+      { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
 
-    const supabase = createClient(supabaseUrl, supabaseServiceKey, {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false
+  const orderId = orderData.orderId;
+  const eventId = `email-${providerEventId ?? orderId ?? Date.now()}`;
+
+  console.log('[Admin Email] Event received:', { provider, eventId, orderId });
+
+  // ============================================================================
+  // IDEMPOTENCY CHECK
+  // ============================================================================
+  const inserted = await tryInsertWebhookEvent(provider, eventId, orderId);
+  if (!inserted) {
+    console.log('[Admin Email] Duplicate or previously processed, returning success');
+    return new Response(
+      JSON.stringify({ accepted: true, note: 'duplicate-or-insert-failed' }),
+      { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    );
+  }
+
+  // ============================================================================
+  // BACKGROUND PROCESSING
+  // ============================================================================
+  const background = (async () => {
+    try {
+      console.log('[Admin Email] Starting background processing');
+
+      // Get admin email recipients
+      const { data: emailRecords, error: emailErr } = await supabase
+        .from('admin_notification_emails')
+        .select('email')
+        .eq('is_active', true);
+
+      let adminEmails: string[];
+      if (emailErr) {
+        console.warn('[Admin Email] Failed to fetch admin emails:', emailErr);
+        const envFallback = Deno.env.get('ADMIN_EMAIL_RECIPIENTS') || '';
+        adminEmails = envFallback ? envFallback.split(',').map(e => e.trim()) : [];
+      } else if (!emailRecords || emailRecords.length === 0) {
+        const adminEmailsEnv = Deno.env.get('ADMIN_EMAIL_RECIPIENTS');
+        adminEmails = adminEmailsEnv ? adminEmailsEnv.split(',').map(email => email.trim()) : [];
+      } else {
+        adminEmails = (emailRecords as any[]).map(r => r.email);
       }
-    });
 
-    // Get authorization header
-    const authHeader = req.headers.get('Authorization');
-    if (!authHeader) {
-      return new Response(
-        JSON.stringify({ error: 'Missing authorization header' }),
-        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // Verify user is authenticated
-    const token = authHeader.replace('Bearer ', '');
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-
-    if (authError || !user) {
-      console.error('Authentication error:', authError);
-      return new Response(
-        JSON.stringify({ error: 'Unauthorized' }),
-        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // Parse request body
-    const orderData: OrderEmailData = await req.json();
-    console.log('Order data received:', orderData.orderId);
-
-    // ============================================================================
-    // IDEMPOTENCY CHECK: Prevent duplicate notifications for the same order
-    // ============================================================================
-    const { data: existingNotification, error: checkError } = await supabase
-      .from('email_notifications')
-      .select('id')
-      .eq('order_id', orderData.orderId)
-      .eq('status', 'sent')
-      .single();
-
-    if (checkError && checkError.code !== 'PGRST116') {
-      // PGRST116 = no rows found (which is expected)
-      console.error('Error checking for existing notifications:', checkError);
-    }
-
-    if (existingNotification) {
-      console.log('⚠️ Email already sent for this order. Returning success (idempotent):', orderData.orderId);
-      return new Response(
-        JSON.stringify({ 
-          success: true, 
-          message: 'Order confirmation email already sent (idempotent)',
-          alreadySent: true
-        }),
-        {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          status: 200,
-        }
-      );
-    }
-
-    // Get active admin email recipients from database
-    const { data: emailRecords, error: emailError } = await supabase
-      .from('admin_notification_emails')
-      .select('email')
-      .eq('is_active', true);
-
-    if (emailError) {
-      console.error('Error fetching admin notification emails:', emailError);
-      return new Response(
-        JSON.stringify({ error: 'Failed to fetch admin email recipients' }),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    if (!emailRecords || emailRecords.length === 0) {
-      console.warn('No active admin notification emails configured');
-      // Fallback to environment variable if database is empty
-      const adminEmailsEnv = Deno.env.get('ADMIN_EMAIL_RECIPIENTS');
-      if (!adminEmailsEnv) {
-        console.error('No admin email recipients configured in database or environment');
-        return new Response(
-          JSON.stringify({ error: 'Admin email recipients not configured' }),
-          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
+      if (adminEmails.length === 0) {
+        console.warn('[Admin Email] No recipients configured, skipping');
+        await markWebhookEventProcessed(provider, eventId, { note: 'no_recipients' }, 'skipped');
+        return;
       }
-      const adminEmails = adminEmailsEnv.split(',').map(email => email.trim());
-      console.log('Using fallback emails from environment:', adminEmails);
-    }
 
-    const adminEmails = emailRecords.map(record => record.email);
-    console.log('Sending emails to:', adminEmails);
+      console.log('[Admin Email] Sending to', adminEmails.length, 'recipient(s)');
 
-    // Get SMTP configuration from environment
-    const smtpHost = Deno.env.get('SMTP_HOST');
-    const smtpPort = Deno.env.get('SMTP_PORT');
-    const smtpUser = Deno.env.get('SMTP_USER');
-    const smtpPassword = Deno.env.get('SMTP_PASSWORD');
-    const smtpFrom = Deno.env.get('SMTP_FROM') || 'orders@jagabansla.com';
+      // Build email HTML
+      const itemsHtml = orderData.items.map(item => `
+        <tr>
+          <td style="padding: 8px; border-bottom: 1px solid #eee;">${item.name}</td>
+          <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: center;">${item.quantity}</td>
+          <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">$${item.price.toFixed(2)}</td>
+          <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">$${(item.price * item.quantity).toFixed(2)}</td>
+        </tr>
+      `).join('');
 
-    if (!smtpHost || !smtpPort || !smtpUser || !smtpPassword) {
-      console.error('SMTP configuration incomplete');
-      return new Response(
-        JSON.stringify({ error: 'Email service not configured' }),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // Format order items for email
-    const itemsHtml = orderData.items.map(item => `
-      <tr>
-        <td style="padding: 8px; border-bottom: 1px solid #eee;">${item.name}</td>
-        <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: center;">${item.quantity}</td>
-        <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">$${item.price.toFixed(2)}</td>
-        <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">$${(item.price * item.quantity).toFixed(2)}</td>
-      </tr>
-    `).join('');
-
-    // Create HTML email content
-    const emailHtml = `
+      const emailHtml = `
 <!DOCTYPE html>
 <html>
 <head>
@@ -263,114 +293,74 @@ serve(async (req) => {
   </div>
 </body>
 </html>
-    `;
+      `;
 
-    // Create plain text version
-    const emailText = `
-New Order Received - Jagabans LA
-
-Order Details:
-- Order ID: ${orderData.orderId}
-- Order Type: ${orderData.orderType === 'delivery' ? 'Delivery' : 'Pickup'}
-- Date: ${new Date(orderData.timestamp).toLocaleString()}
-
-Customer Information:
-- Name: ${orderData.customerName}
-- Email: ${orderData.customerEmail}
-${orderData.customerPhone ? `- Phone: ${orderData.customerPhone}` : ''}
-${orderData.orderType === 'delivery' && orderData.deliveryAddress ? `- Delivery Address: ${orderData.deliveryAddress}` : ''}
-${orderData.orderType === 'pickup' && orderData.pickupNotes ? `- Pickup Notes: ${orderData.pickupNotes}` : ''}
-
-Order Items:
-${orderData.items.map(item => `- ${item.name} x${item.quantity} - $${(item.price * item.quantity).toFixed(2)}`).join('\n')}
-
-Payment Summary:
-- Subtotal: $${orderData.subtotal.toFixed(2)}
-- Tax: $${orderData.tax.toFixed(2)}
-- Total Paid: $${orderData.total.toFixed(2)}
-
-This order has been paid and is ready to be prepared.
-Please log in to the admin dashboard to update the order status.
-
----
-This is an automated notification from Jagabans LA order system.
-© ${new Date().getFullYear()} Jagabans LA. All rights reserved.
-    `;
-
-    // Send email using SMTP (using a simple fetch to an SMTP relay service)
-    // Note: In production, you would use a service like SendGrid, Mailgun, or AWS SES
-    // For now, we'll use Resend API which is simple and reliable
-    
-    const resendApiKey = Deno.env.get('RESEND_API_KEY');
-    
-    if (resendApiKey) {
-      // Use Resend API
-      console.log('Sending email via Resend API...');
-      
-      const resendResponse = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${resendApiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from: smtpFrom,
-          to: adminEmails,
-          subject: `New Order #${orderData.orderId.substring(0, 8)} - ${orderData.orderType === 'delivery' ? 'Delivery' : 'Pickup'}`,
-          html: emailHtml,
-          text: emailText,
-        }),
-      });
-
-      if (!resendResponse.ok) {
-        const errorText = await resendResponse.text();
-        console.error('Resend API error:', errorText);
-        throw new Error(`Failed to send email: ${errorText}`);
+      // Send email
+      let sendResult: any;
+      try {
+        sendResult = await sendResendEmail(
+          adminEmails,
+          `New Order #${orderData.orderId.substring(0, 8)} - ${orderData.orderType === 'delivery' ? 'Delivery' : 'Pickup'}`,
+          emailHtml
+        );
+        console.log('[Admin Email] ✓ Sent successfully');
+      } catch (err) {
+        console.error('[Admin Email] Send failed:', String(err));
+        await markWebhookEventProcessed(provider, eventId, { error: String(err) }, 'errored');
+        
+        // Log failure
+        try {
+          await supabase.from('email_notifications').insert({
+            order_id: orderData.orderId,
+            recipient_emails: adminEmails,
+            subject: `New Order #${orderData.orderId.substring(0, 8)}`,
+            sent_at: new Date().toISOString(),
+            status: 'errored',
+            result: { error: String(err) },
+          });
+        } catch (logErr) {
+          console.warn('[Admin Email] Failed to log error:', logErr);
+        }
+        return;
       }
 
-      const resendResult = await resendResponse.json();
-      console.log('Email sent successfully via Resend:', resendResult);
-    } else {
-      // Fallback: Log email content (for development/testing)
-      console.log('RESEND_API_KEY not configured - email would be sent to:', adminEmails);
-      console.log('Email subject:', `New Order #${orderData.orderId.substring(0, 8)} - ${orderData.orderType === 'delivery' ? 'Delivery' : 'Pickup'}`);
-      console.log('Email content logged (not sent)');
+      // Log success
+      try {
+        await supabase.from('email_notifications').insert({
+          order_id: orderData.orderId,
+          recipient_emails: adminEmails,
+          subject: `New Order #${orderData.orderId.substring(0, 8)}`,
+          sent_at: new Date().toISOString(),
+          status: 'sent',
+          result: sendResult,
+        });
+      } catch (err) {
+        console.warn('[Admin Email] Failed to log sent email:', err);
+      }
+
+      await markWebhookEventProcessed(provider, eventId, { sendResult }, 'processed');
+
+    } catch (err) {
+      console.error('[Admin Email] Background error:', String(err));
+      await markWebhookEventProcessed(provider, eventId, { error: String(err) }, 'errored');
     }
+  })();
 
-    // Log the email notification in the database for audit trail
-    await supabase
-      .from('email_notifications')
-      .insert({
-        order_id: orderData.orderId,
-        recipient_emails: adminEmails,
-        subject: `New Order #${orderData.orderId.substring(0, 8)} - ${orderData.orderType === 'delivery' ? 'Delivery' : 'Pickup'}`,
-        sent_at: new Date().toISOString(),
-        status: 'sent',
-      });
-
-    return new Response(
-      JSON.stringify({ 
-        success: true, 
-        message: 'Order confirmation email sent successfully',
-        recipients: adminEmails.length
-      }),
-      {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        status: 200,
-      }
-    );
-  } catch (error: any) {
-    console.error('=== Send Order Confirmation Email Error ===');
-    console.error('Error:', error);
-    console.error('Error message:', error.message);
-    return new Response(
-      JSON.stringify({
-        error: error.message || 'Failed to send order confirmation email',
-      }),
-      {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        status: 500,
-      }
-    );
+  // Use EdgeRuntime.waitUntil if available
+  if ((globalThis as any).EdgeRuntime?.waitUntil) {
+    try {
+      (globalThis as any).EdgeRuntime.waitUntil(background);
+    } catch (err) {
+      console.warn('[Admin Email] EdgeRuntime.waitUntil failed:', String(err));
+    }
   }
+
+  return new Response(
+    JSON.stringify({
+      success: true,
+      accepted: true,
+      note: 'processing',
+    }),
+    { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+  );
 });
