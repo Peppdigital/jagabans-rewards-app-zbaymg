@@ -21,9 +21,13 @@ config.resolver.platforms = ['ios', 'android', 'native', 'web'];
 
 config.resolver.resolverMainFields = ['react-native', 'browser', 'main', 'module'];
 
-// Block native-only modules from being resolved in web builds
+// Block native-only modules from being resolved in web builds, and stub optional
+// telemetry packages that use variable-based dynamic imports incompatible with Hermes.
 config.resolver.resolveRequest = (context, moduleName, platform) => {
   if (platform === 'web' && moduleName === '@stripe/stripe-react-native') {
+    return { type: 'empty' };
+  }
+  if (platform !== 'web' && moduleName === '@opentelemetry/api') {
     return { type: 'empty' };
   }
   return context.resolveRequest(context, moduleName, platform);
