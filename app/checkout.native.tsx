@@ -1181,7 +1181,7 @@ const pointsToEarn = appPointsEnabled
             >
               <IconSymbol name="info" size={20} color={currentColors.primary} />
               <Text style={styles.infoText}>
-                Secure checkout powered by Stripe. Your payment information is encrypted and protected. Enjoy {appDiscountPct * 100}% off your order!
+                Secure checkout powered by Square. Your payment information is encrypted and protected. Enjoy {appDiscountPct * 100}% off your order!
               </Text>
             </LinearGradient>
 

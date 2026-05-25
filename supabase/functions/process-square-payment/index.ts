@@ -41,6 +41,7 @@ interface PaymentRequest {
   deliveryQuoteId?: string | null;
   deliveryFee?: number;      // dollars
   deliveryFeeCents?: number; // cents
+  customerId?: string;       // Square customer ID — required when sourceId is a stored card
 }
 
 interface OrderEmailData {
@@ -472,6 +473,7 @@ Deno.serve(async (req: Request) => {
       items,
       deliveryQuoteId,
       deliveryFeeCents,
+      customerId,
     } = body;
 
     const orderType: "delivery" | "pickup" =
@@ -530,6 +532,7 @@ Deno.serve(async (req: Request) => {
         source_id: sourceId,
         idempotency_key: idempotencyKey,
         amount_money: { amount, currency },
+        ...(customerId ? { customer_id: customerId } : {}),
         note: customer?.name
           ? `${orderType === "pickup" ? "Pickup" : "Delivery"} order — ${customer.name}`
           : undefined,
