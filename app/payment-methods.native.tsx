@@ -18,7 +18,7 @@ import * as Haptics from 'expo-haptics';
 import Toast from '@/components/Toast';
 import Dialog from '@/components/Dialog';
 import { supabase, SUPABASE_URL } from '@/app/integrations/supabase/client';
-import { SQIPCore, SQIPCardEntry, type CardDetails } from '@/utils/squareInAppPayments';
+import { SQIPCore, SQIPCardEntry, type CardDetails, type NonceSuccessResult } from '@/utils/squareInAppPayments';
 import { LinearGradient } from 'expo-linear-gradient';
 
 interface StoredCard {
@@ -208,11 +208,15 @@ export default function PaymentMethodsScreen() {
     squareSheetOpen.current = true;
     SQIPCardEntry.startCardEntryFlow(
       false,
-      (cardDetails: CardDetails) => {
+      (cardDetails: CardDetails): NonceSuccessResult => {
         squareSheetOpen.current = false;
-        pendingNonce.current = cardDetails.nonce;
-        SQIPCardEntry.completeCardEntry(() => {});
-        setNonceReady(true);
+        pendingNonce.current = cardDetails.nonce ?? null;
+        return {
+          success: true,
+          onCardEntryComplete: () => {
+            setNonceReady(true);
+          },
+        };
       },
       () => {
         squareSheetOpen.current = false;

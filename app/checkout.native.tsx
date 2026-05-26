@@ -19,7 +19,7 @@ import { IconSymbol } from '@/components/IconSymbol';
 import * as Haptics from 'expo-haptics';
 import Toast from '@/components/Toast';
 import { SUPABASE_URL, supabase } from '@/app/integrations/supabase/client';
-import { SQIPCore, SQIPCardEntry, type CardDetails } from '@/utils/squareInAppPayments';
+import { SQIPCore, SQIPCardEntry, type CardDetails, type NonceSuccessResult } from '@/utils/squareInAppPayments';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Linking from 'expo-linking';
 import {appConfigService} from '@/services/supabaseService';
@@ -813,11 +813,15 @@ const pointsToEarn = appPointsEnabled
     squareSheetOpen.current = true;
     SQIPCardEntry.startCardEntryFlow(
       false,
-      (cardDetails: CardDetails) => {
+      (cardDetails: CardDetails): NonceSuccessResult => {
         squareSheetOpen.current = false;
-        pendingNonce.current = cardDetails.nonce;
-        SQIPCardEntry.completeCardEntry(() => {});
-        setCheckoutNonceReady(true);
+        pendingNonce.current = cardDetails.nonce ?? null;
+        return {
+          success: true,
+          onCardEntryComplete: () => {
+            setCheckoutNonceReady(true);
+          },
+        };
       },
       () => {
         squareSheetOpen.current = false;
