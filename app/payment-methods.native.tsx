@@ -179,7 +179,9 @@ export default function PaymentMethodsScreen() {
 
       if (error) throw error;
 
-      const cards: StoredCard[] = (data ?? []).map((card: any) => ({
+      const cards: StoredCard[] = (data ?? [])
+        .filter((card: any) => !card.stripe_payment_method_id?.startsWith('pm_'))
+        .map((card: any) => ({
         id: card.id,
         squareCardId: card.stripe_payment_method_id || '',
         cardBrand: card.brand || 'UNKNOWN',

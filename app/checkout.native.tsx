@@ -647,7 +647,9 @@ const pointsToEarn = appPointsEnabled
       .order('is_default', { ascending: false })
       .order('created_at', { ascending: false })
       .then(({ data }) => {
-        const cards: SavedCard[] = (data ?? []).map((c: any) => ({
+        const cards: SavedCard[] = (data ?? [])
+          .filter((c: any) => !c.stripe_payment_method_id?.startsWith('pm_'))
+          .map((c: any) => ({
           id: c.id,
           squareCardId: c.stripe_payment_method_id,
           squareCustomerId: c.stripe_customer_id,

@@ -15,7 +15,7 @@ import { useRouter } from 'expo-router';
 import { IconSymbol } from '@/components/IconSymbol';
 import { colors } from '@/styles/commonStyles';
 import * as Haptics from 'expo-haptics';
-import { appConfigService } from '@/services/supabaseService';
+import { appConfigService, DEFAULT_STORE_HOURS, type StoreHours } from '@/services/supabaseService';
 import Toast from '@/components/Toast';
 import { useAppConfig } from '@/hooks/useAppConfig';
 
@@ -26,6 +26,8 @@ export default function StoreSettingsScreen() {
   // Store hours local state
   const [hoursRestrictedEnabled, setHoursRestrictedEnabled] = useState(true);
   const [storeManuallyClosedState, setStoreManuallyClosedState] = useState(false);
+  const [storeHours, setStoreHours] = useState<StoreHours>(DEFAULT_STORE_HOURS);
+  const [hoursLoading, setHoursLoading] = useState(false);
 
   // Pricing local state
   const [discountEnabled, setDiscountEnabled] = useState(true);
@@ -53,6 +55,7 @@ export default function StoreSettingsScreen() {
   useEffect(() => {
     setHoursRestrictedEnabled(config.hours_restriction_enabled);
     setStoreManuallyClosedState(config.store_manually_closed);
+    setStoreHours(config.store_hours);
     setDiscountEnabled(config.discount_enabled);
     setDiscountPercentage(config.discount_percentage);
     setDiscountInput(String(config.discount_percentage));
@@ -83,6 +86,38 @@ export default function StoreSettingsScreen() {
     } else {
       showToast('success', value ? 'Store manually closed' : 'Store reopened');
     }
+  };
+
+  // ── Schedule handlers ───────────────────────────────────────────────────
+
+  const saveStoreHours = async (updated: StoreHours) => {
+    setHoursLoading(true);
+    const { error } = await appConfigService.updateAppConfig({ store_hours: updated });
+    setHoursLoading(false);
+    if (error) showToast('error', 'Failed to save store hours');
+    else showToast('success', 'Store hours updated');
+  };
+
+  const handleDayToggle = async (day: keyof StoreHours, open: boolean) => {
+    if (Platform.OS !== 'web') Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const updated = { ...storeHours, [day]: { ...storeHours[day], open } };
+    setStoreHours(updated);
+    await saveStoreHours(updated);
+  };
+
+  const handleTimeChange = (day: keyof StoreHours, field: 'openTime' | 'closeTime', value: string) => {
+    setStoreHours(prev => ({ ...prev, [day]: { ...prev[day], [field]: value } }));
+  };
+
+  const handleTimeBlur = async (day: keyof StoreHours, field: 'openTime' | 'closeTime', value: string) => {
+    if (!/^\d{1,2}:\d{2}$/.test(value)) {
+      showToast('error', 'Use HH:MM format (e.g. 11:30 or 22:00)');
+      setStoreHours(prev => ({ ...prev, [day]: { ...prev[day], [field]: config.store_hours[day][field] } }));
+      return;
+    }
+    const updated = { ...storeHours, [day]: { ...storeHours[day], [field]: value } };
+    setStoreHours(updated);
+    await saveStoreHours(updated);
   };
 
   // ── Pricing handlers ────────────────────────────────────────────────────
@@ -251,6 +286,76 @@ export default function StoreSettingsScreen() {
             />
           </View>
         </View>
+
+        {/* ── Schedule Section ────────────────────────────────────────── */}
+        {hoursRestrictedEnabled && (
+          <>
+            <View style={styles.sectionLabel}>
+              <IconSymbol
+                name={Platform.OS === 'ios' ? 'calendar' : 'calendar-today'}
+                size={15}
+                color={colors.primary}
+              />
+              <Text style={styles.sectionLabelText}>WEEKLY SCHEDULE</Text>
+              {hoursLoading && <ActivityIndicator size="small" color={colors.primary} style={{ marginLeft: 6 }} />}
+            </View>
+
+            <View style={styles.card}>
+              {(Object.keys(DEFAULT_STORE_HOURS) as (keyof StoreHours)[]).map((day, index, arr) => {
+                const dayConfig = storeHours[day];
+                const label = day.charAt(0).toUpperCase() + day.slice(1);
+                const isLast = index === arr.length - 1;
+                return (
+                  <View key={day}>
+                    <View style={styles.row}>
+                      <View style={styles.rowLeft}>
+                        <Text style={styles.rowLabel}>{label}</Text>
+                        {dayConfig.open && (
+                          <View style={styles.timeRow}>
+                            <TextInput
+                              style={styles.timeInput}
+                              value={dayConfig.openTime}
+                              onChangeText={v => handleTimeChange(day, 'openTime', v)}
+                              onBlur={() => handleTimeBlur(day, 'openTime', dayConfig.openTime)}
+                              keyboardType="numbers-and-punctuation"
+                              maxLength={5}
+                              selectTextOnFocus
+                              editable={!hoursLoading}
+                              placeholder="00:00"
+                              placeholderTextColor={colors.textSecondary}
+                            />
+                            <Text style={styles.timeSeparator}>–</Text>
+                            <TextInput
+                              style={styles.timeInput}
+                              value={dayConfig.closeTime}
+                              onChangeText={v => handleTimeChange(day, 'closeTime', v)}
+                              onBlur={() => handleTimeBlur(day, 'closeTime', dayConfig.closeTime)}
+                              keyboardType="numbers-and-punctuation"
+                              maxLength={5}
+                              selectTextOnFocus
+                              editable={!hoursLoading}
+                              placeholder="00:00"
+                              placeholderTextColor={colors.textSecondary}
+                            />
+                          </View>
+                        )}
+                      </View>
+                      <Switch
+                        value={dayConfig.open}
+                        onValueChange={v => handleDayToggle(day, v)}
+                        trackColor={{ false: colors.border, true: colors.primary }}
+                        thumbColor="#FFFFFF"
+                        ios_backgroundColor={colors.border}
+                        disabled={hoursLoading || configLoading}
+                      />
+                    </View>
+                    {!isLast && <View style={styles.divider} />}
+                  </View>
+                );
+              })}
+            </View>
+          </>
+        )}
 
         {/* ── Discount Section ────────────────────────────────────────── */}
         <View style={styles.sectionLabel}>
@@ -538,6 +643,30 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
     minWidth: 10,
+  },
+  timeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 6,
+  },
+  timeInput: {
+    width: 60,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    fontSize: 14,
+    fontWeight: '600',
+    textAlign: 'center',
+    color: colors.text,
+    borderColor: colors.border,
+    backgroundColor: colors.background,
+  },
+  timeSeparator: {
+    fontSize: 14,
+    color: colors.textSecondary,
+    fontWeight: '600',
   },
   // Footer
   footer: {

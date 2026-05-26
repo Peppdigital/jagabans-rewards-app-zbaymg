@@ -9,9 +9,79 @@
  * Ordering is accepted 30 minutes before kitchen opening time.
  */
 
+import type { StoreHours } from '@/services/supabaseService';
+
 export interface OrderingStatus {
   isOpen: boolean;
   message: string;
+}
+
+const DAY_KEYS: (keyof StoreHours)[] = [
+  'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
+];
+
+function parseTimeToMinutes(time: string): number {
+  const [h, m] = time.split(':').map(Number);
+  return (h || 0) * 60 + (m || 0);
+}
+
+function formatTime12h(time: string): string {
+  const [h, m] = time.split(':').map(Number);
+  const period = (h ?? 0) >= 12 ? 'PM' : 'AM';
+  const hour12 = (h ?? 0) % 12 || 12;
+  return (m ?? 0) === 0
+    ? `${hour12} ${period}`
+    : `${hour12}:${String(m).padStart(2, '0')} ${period}`;
+}
+
+function nextOpenDay(storeHours: StoreHours, fromIndex: number): { label: string; openTime: string } {
+  for (let i = 1; i <= 7; i++) {
+    const idx = (fromIndex + i) % 7;
+    const day = storeHours[DAY_KEYS[idx]];
+    if (day.open) {
+      const label = DAY_KEYS[idx].charAt(0).toUpperCase() + DAY_KEYS[idx].slice(1);
+      return { label, openTime: day.openTime };
+    }
+  }
+  return { label: 'soon', openTime: '' };
+}
+
+/**
+ * Returns ordering status based on dynamic hours stored in app_config.
+ */
+export function getOrderingStatusFromConfig(storeHours: StoreHours): OrderingStatus {
+  const laTime = getLosAngelesDate();
+  const dayIndex = laTime.getUTCDay(); // 0=Sun … 6=Sat
+  const todayKey = DAY_KEYS[dayIndex];
+  const today = storeHours[todayKey];
+
+  if (!today.open) {
+    const next = nextOpenDay(storeHours, dayIndex);
+    const timeStr = next.openTime ? ` at ${formatTime12h(next.openTime)}` : '';
+    return {
+      isOpen: false,
+      message: `We're closed today. Ordering resumes ${next.label}${timeStr}.`,
+    };
+  }
+
+  const now = laTime.getUTCHours() * 60 + laTime.getUTCMinutes();
+  const openMin = parseTimeToMinutes(today.openTime);
+  const closeMin = parseTimeToMinutes(today.closeTime);
+
+  if (now < openMin) {
+    return { isOpen: false, message: `Ordering opens at ${formatTime12h(today.openTime)}.` };
+  }
+
+  if (now >= closeMin) {
+    const next = nextOpenDay(storeHours, dayIndex);
+    const timeStr = next.openTime ? ` at ${formatTime12h(next.openTime)}` : '';
+    return {
+      isOpen: false,
+      message: `We're closed for the night. Ordering resumes ${next.label}${timeStr}.`,
+    };
+  }
+
+  return { isOpen: true, message: '' };
 }
 
 /**

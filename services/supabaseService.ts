@@ -1873,9 +1873,36 @@ export const imageService = {
   },
 };
 
+export interface DayHours {
+  open: boolean;
+  openTime: string;  // 24-h "HH:MM"
+  closeTime: string; // 24-h "HH:MM"
+}
+
+export interface StoreHours {
+  monday: DayHours;
+  tuesday: DayHours;
+  wednesday: DayHours;
+  thursday: DayHours;
+  friday: DayHours;
+  saturday: DayHours;
+  sunday: DayHours;
+}
+
+export const DEFAULT_STORE_HOURS: StoreHours = {
+  monday:    { open: false, openTime: '00:00', closeTime: '00:00' },
+  tuesday:   { open: true,  openTime: '11:30', closeTime: '22:00' },
+  wednesday: { open: true,  openTime: '11:30', closeTime: '22:00' },
+  thursday:  { open: true,  openTime: '11:30', closeTime: '22:00' },
+  friday:    { open: true,  openTime: '11:30', closeTime: '22:00' },
+  saturday:  { open: true,  openTime: '13:30', closeTime: '22:00' },
+  sunday:    { open: true,  openTime: '13:30', closeTime: '22:00' },
+};
+
 export interface AppConfig {
   hours_restriction_enabled: boolean;
   store_manually_closed: boolean;
+  store_hours: StoreHours;
   discount_enabled: boolean;
   discount_percentage: number;
   points_enabled: boolean;
@@ -1892,11 +1919,12 @@ export const appConfigService = {
         .in('key', [
           'hours_restriction_enabled',
           'store_manually_closed',
+          'store_hours',
           'discount_enabled',
           'discount_percentage',
           'points_enabled',
           'points_value_rate',
-          'points_reward_percentage', // ← add
+          'points_reward_percentage',
         ]);
       if (error) throw error;
 
@@ -1914,15 +1942,22 @@ export const appConfigService = {
         return isNaN(parsed) ? fallback : parsed;
       };
 
+      const getJson = <T>(key: string, fallback: T): T => {
+        const row = rows.find((r) => r.key === key);
+        if (!row) return fallback;
+        try { return JSON.parse(row.value) as T; } catch { return fallback; }
+      };
+
       return {
         data: {
           hours_restriction_enabled: getBool('hours_restriction_enabled', true),
           store_manually_closed:     getBool('store_manually_closed', false),
+          store_hours:               getJson<StoreHours>('store_hours', DEFAULT_STORE_HOURS),
           discount_enabled:          getBool('discount_enabled', true),
           discount_percentage:       getNum('discount_percentage', 10),
           points_enabled:            getBool('points_enabled', true),
           points_value_rate:         getNum('points_value_rate', 0.01),
-          points_reward_percentage: getNum('points_reward_percentage', 5),
+          points_reward_percentage:  getNum('points_reward_percentage', 5),
         },
         error: null,
       };
@@ -1936,7 +1971,7 @@ export const appConfigService = {
     try {
       const upserts = Object.entries(config).map(([key, value]) => ({
         key,
-        value: String(value),
+        value: value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value),
         updated_at: new Date().toISOString(),
       }));
       const { error } = await supabase

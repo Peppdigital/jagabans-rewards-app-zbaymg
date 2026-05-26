@@ -16,8 +16,9 @@ import {
   paymentMethodService,
   appConfigService,
   type AppConfig,
+  DEFAULT_STORE_HOURS,
 } from '@/services/supabaseService';
-import { getOrderingStatus, type OrderingStatus } from '@/utils/mondayBlock';
+import { getOrderingStatus, getOrderingStatusFromConfig, type OrderingStatus } from '@/utils/mondayBlock';
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { playOrderReadySound, configureNotificationSound } from '@/utils/notificationSound';
 
@@ -85,6 +86,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   const [appConfig, setAppConfig] = useState<AppConfig>({
     hours_restriction_enabled: true,
     store_manually_closed: false,
+    store_hours: DEFAULT_STORE_HOURS,
     discount_enabled: true,
     discount_percentage: 10,
     points_enabled: true,
@@ -316,7 +318,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     if (!appConfig.hours_restriction_enabled) {
       return { isOpen: true, message: '' };
     }
-    return getOrderingStatus();
+    return getOrderingStatusFromConfig(appConfig.store_hours);
   })();
   
   // Load user profile when authenticated
