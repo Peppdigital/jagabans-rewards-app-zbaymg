@@ -42,6 +42,7 @@ interface PaymentRequest {
   deliveryFee?: number;      // dollars
   deliveryFeeCents?: number; // cents
   discountAmount?: number;   // cents — server verifies against app_settings
+  customerId?: string;       // Square customer ID — required when sourceId is a stored card
 }
 
 interface OrderEmailData {
@@ -480,6 +481,7 @@ Deno.serve(async (req: Request) => {
       deliveryQuoteId,
       deliveryFeeCents: clientDeliveryFeeCents,
       discountAmount:   clientDiscountCents,
+      customerId,
     } = body;
 
     const orderType: "delivery" | "pickup" =
@@ -524,7 +526,7 @@ Deno.serve(async (req: Request) => {
     const { data: configRows, error: configErr } = await supabaseAdmin
       .from("app_config")
       .select("key, value")
-      .in("key", ["discount_enabled", "discount_percentage"]);
+      .in("key", ["discount_enabled", "discount_percentage", "points_enabled"]);
 
     if (configErr) {
       console.error("app_config fetch failed:", configErr.message);
@@ -538,6 +540,8 @@ Deno.serve(async (req: Request) => {
     const serverDiscountEnabled    = configMap["discount_enabled"] === true
                                   || configMap["discount_enabled"] === "true";
     const serverDiscountPercentage = Number(configMap["discount_percentage"]) || 10;
+    const serverPointsEnabled      = configMap["points_enabled"] === true
+                                  || configMap["points_enabled"] === "true";
 
     const effectiveDiscountCents = serverDiscountEnabled
       ? Math.round((subtotal * serverDiscountPercentage) / 100)
@@ -624,6 +628,7 @@ Deno.serve(async (req: Request) => {
         idempotency_key: idempotencyKey,
         amount_money:    { amount: chargeAmount, currency },
         location_id:     Deno.env.get("SQUARE_LOCATION_ID"),
+        ...(customerId ? { customer_id: customerId } : {}),
         note: customer?.name
           ? `${orderType === "pickup" ? "Pickup" : "Delivery"} order — ${customer.name}`
           : undefined,
@@ -695,7 +700,7 @@ Deno.serve(async (req: Request) => {
 
     // Points are earned on the post-discount food subtotal only —
     // tax and delivery fee are excluded from the reward base.
-    const pointsEarned = userId ? Math.floor(discountedSubtotalCents / 100) : 0;
+    const pointsEarned = (userId && serverPointsEnabled) ? Math.floor(discountedSubtotalCents / 100) : 0;
     const customerName = deriveCustomerName(body, payment);
 
     const { data: orderRow, error: orderErr } = await supabaseAdmin

@@ -3,6 +3,13 @@ const { FileStore } = require('metro-cache');
 const path = require('path');
 
 const config = getDefaultConfig(__dirname);
+const squareInAppPaymentsSource = path.join(
+  __dirname,
+  'node_modules',
+  'react-native-square-in-app-payments',
+  'src',
+  'index.ts'
+);
 
 // Use turborepo to restore the cache when possible
 config.cacheStores = [
@@ -24,6 +31,12 @@ config.resolver.resolverMainFields = ['react-native', 'browser', 'main', 'module
 // Block native-only modules from being resolved in web builds, and stub optional
 // telemetry packages that use variable-based dynamic imports incompatible with Hermes.
 config.resolver.resolveRequest = (context, moduleName, platform) => {
+  if (moduleName === 'react-native-square-in-app-payments') {
+    return {
+      type: 'sourceFile',
+      filePath: squareInAppPaymentsSource,
+    };
+  }
   if (platform === 'web' && moduleName === '@stripe/stripe-react-native') {
     return { type: 'empty' };
   }

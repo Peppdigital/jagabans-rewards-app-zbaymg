@@ -10,7 +10,7 @@ import {
   Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useRouter, useLocalSearchParams, Stack } from 'expo-router';
 import { useApp } from '@/contexts/AppContext';
 import { IconSymbol } from '@/components/IconSymbol';
 import * as Haptics from 'expo-haptics';
@@ -26,6 +26,10 @@ interface OrderItem {
 
 interface OrderDetails {
   id: string;
+  subtotal: number;
+  discount: number;
+  tax: number;
+  delivery_fee: number;
   total: number;
   points_earned: number;
   status: string;
@@ -69,6 +73,10 @@ export default function OrderConfirmationScreen() {
         .from('orders')
         .select(`
           id,
+          subtotal,
+          discount,
+          tax,
+          delivery_fee,
           total,
           points_earned,
           status,
@@ -365,12 +373,28 @@ export default function OrderConfirmationScreen() {
       fontFamily: 'Inter_600SemiBold',
       color: currentColors.text,
     },
+    summaryRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      paddingVertical: 6,
+    },
+    summaryLabel: {
+      fontSize: 14,
+      fontFamily: 'Inter_400Regular',
+      color: currentColors.textSecondary,
+    },
+    summaryValue: {
+      fontSize: 14,
+      fontFamily: 'Inter_400Regular',
+      color: currentColors.textSecondary,
+    },
     totalRow: {
       flexDirection: 'row',
       justifyContent: 'space-between',
       alignItems: 'center',
-      marginTop: 16,
-      paddingTop: 16,
+      marginTop: 8,
+      paddingTop: 12,
       borderTopWidth: 2,
       borderTopColor: currentColors.border,
     },
@@ -475,6 +499,7 @@ export default function OrderConfirmationScreen() {
         end={{ x: 0, y: 1 }}
         style={styles.gradientContainer}
       >
+        <Stack.Screen options={{ headerShown: false }} />
         <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
           <View style={styles.loadingContainer}>
             <ActivityIndicator size="large" color={currentColors.secondary} />
@@ -493,6 +518,7 @@ export default function OrderConfirmationScreen() {
         end={{ x: 0, y: 1 }}
         style={styles.gradientContainer}
       >
+        <Stack.Screen options={{ headerShown: false }} />
         <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
           <View style={styles.errorContainer}>
             <IconSymbol
@@ -539,6 +565,7 @@ export default function OrderConfirmationScreen() {
       end={{ x: 0, y: 1 }}
       style={styles.gradientContainer}
     >
+      <Stack.Screen options={{ headerShown: false }} />
       <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
         <ScrollView
           style={styles.scrollView}
@@ -665,6 +692,28 @@ export default function OrderConfirmationScreen() {
                 </Text>
               </View>
             ))}
+            <View style={{ marginTop: 12, borderTopWidth: 2, borderTopColor: currentColors.border, paddingTop: 12 }}>
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>Subtotal</Text>
+                <Text style={styles.summaryValue}>${order.subtotal.toFixed(2)}</Text>
+              </View>
+              {order.discount > 0 && (
+                <View style={styles.summaryRow}>
+                  <Text style={[styles.summaryLabel, { color: '#10B981' }]}>Discount</Text>
+                  <Text style={[styles.summaryValue, { color: '#10B981' }]}>−${order.discount.toFixed(2)}</Text>
+                </View>
+              )}
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>Tax</Text>
+                <Text style={styles.summaryValue}>${order.tax.toFixed(2)}</Text>
+              </View>
+              {order.delivery_fee > 0 && (
+                <View style={styles.summaryRow}>
+                  <Text style={styles.summaryLabel}>Delivery Fee</Text>
+                  <Text style={styles.summaryValue}>${order.delivery_fee.toFixed(2)}</Text>
+                </View>
+              )}
+            </View>
             <View style={styles.totalRow}>
               <Text style={styles.totalLabel}>Total</Text>
               <Text style={styles.totalValue}>${order.total.toFixed(2)}</Text>

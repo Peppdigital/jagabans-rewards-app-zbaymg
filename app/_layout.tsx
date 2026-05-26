@@ -1,7 +1,6 @@
 
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { StripeProvider } from '@stripe/stripe-react-native';
 import { useFonts } from 'expo-font';
 import { Stack } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
@@ -104,9 +103,9 @@ export default function RootLayout() {
     <AuthProvider>
       <AppProvider>
         <ThemeProvider value={DarkTheme}>
-          <StripeProvider
+          {/* <StripeProvider
               publishableKey={process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY! || "pk_live_51SaVNBEpxgw216dfngaO9r3erOFV7XFC4zvvwMd97HuPpWpvCy26sCwWITZHhmtAv6iZLT35RGITrIxBoTF1v9AI007NGoktyP"}
-            >
+            > */}
           <Stack>
             <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
             <Stack.Screen name="admin" options={{ headerShown: false }} />
@@ -247,7 +246,7 @@ export default function RootLayout() {
           </Stack>
           <StatusBar style="light" />
           <Toast />
-          </StripeProvider>
+          {/* </StripeProvider> */}
         </ThemeProvider>
       </AppProvider>
     </AuthProvider>

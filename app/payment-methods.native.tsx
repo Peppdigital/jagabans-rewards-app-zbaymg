@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,6 +8,7 @@ import {
   Pressable,
   Platform,
   ActivityIndicator,
+  AppState,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -17,12 +18,12 @@ import * as Haptics from 'expo-haptics';
 import Toast from '@/components/Toast';
 import Dialog from '@/components/Dialog';
 import { supabase, SUPABASE_URL } from '@/app/integrations/supabase/client';
-import { useStripe, CardField } from '@stripe/stripe-react-native';
+import { SQIPCore, SQIPCardEntry, type CardDetails } from '@/utils/squareInAppPayments';
 import { LinearGradient } from 'expo-linear-gradient';
 
 interface StoredCard {
   id: string;
-  stripePaymentMethodId: string;
+  squareCardId: string;
   cardBrand: string;
   last4: string;
   expMonth: number;
@@ -32,24 +33,23 @@ interface StoredCard {
 
 export default function PaymentMethodsScreen() {
   const router = useRouter();
-  const { userProfile, currentColors, loadUserProfile } = useApp();
-  const stripe = useStripe();
-  
+  const { userProfile, currentColors } = useApp();
+
   const [storedCards, setStoredCards] = useState<StoredCard[]>([]);
   const [loading, setLoading] = useState(false);
   const [processing, setProcessing] = useState(false);
-  const [showAddCard, setShowAddCard] = useState(false);
-  const [cardComplete, setCardComplete] = useState(false);
+  const pendingNonce = useRef<string | null>(null);
+  const sessionRef = useRef<any>(null);
+  const squareSheetOpen = useRef(false);
   const [toastVisible, setToastVisible] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
   const [toastType, setToastType] = useState<'success' | 'error' | 'info'>('success');
-  
-  // Dialog state
+
   const [dialogVisible, setDialogVisible] = useState(false);
   const [dialogConfig, setDialogConfig] = useState({
     title: '',
     message: '',
-    buttons: [] as Array<{ text: string; onPress: () => void; style?: 'default' | 'destructive' | 'cancel' }>
+    buttons: [] as { text: string; onPress: () => void; style?: 'default' | 'destructive' | 'cancel' }[]
   });
 
   const showToast = (type: 'success' | 'error' | 'info', message: string) => {
@@ -58,46 +58,123 @@ export default function PaymentMethodsScreen() {
     setToastVisible(true);
   };
 
-  const showDialog = (title: string, message: string, buttons: Array<{ text: string; onPress: () => void; style?: 'default' | 'destructive' | 'cancel' }>) => {
+  const showDialog = (
+    title: string,
+    message: string,
+    buttons: { text: string; onPress: () => void; style?: 'default' | 'destructive' | 'cancel' }[]
+  ) => {
     setDialogConfig({ title, message, buttons });
     setDialogVisible(true);
   };
 
+  useEffect(() => {
+    const appId = process.env.EXPO_PUBLIC_SQUARE_APPLICATION_ID;
+    if (appId) {
+      try {
+        SQIPCore.setSquareApplicationId(appId);
+      } catch (err) {
+        console.error('[Square] Native module not available — rebuild required:', err);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active' && squareSheetOpen.current) {
+        squareSheetOpen.current = false;
+        setProcessing(false);
+        pendingNonce.current = null;
+        sessionRef.current = null;
+      }
+    });
+    return () => sub.remove();
+  }, []);
+
+  // Runs after the Square sheet has closed and state has committed.
+  // pendingNonce is set synchronously inside the nonce callback before
+  // completeCardEntry is called, so by the time this effect fires the
+  // sheet is gone and the JS event loop is fully free.
+  const [nonceReady, setNonceReady] = useState(false);
+  useEffect(() => {
+    if (!nonceReady) return;
+    setNonceReady(false);
+
+    const nonce = pendingNonce.current;
+    const session = sessionRef.current;
+    if (!nonce || !session) {
+      setProcessing(false);
+      return;
+    }
+    pendingNonce.current = null;
+
+    (async () => {
+      try {
+        const customerResp = await fetch(`${SUPABASE_URL}/functions/v1/create-square-customer`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session.access_token}`,
+          },
+        });
+
+        if (!customerResp.ok) {
+          const errData = await customerResp.json().catch(() => ({}));
+          showToast('error', (errData as any).error || 'Failed to create customer account');
+          return;
+        }
+
+        const { customerId } = await customerResp.json();
+
+        const saveResp = await fetch(`${SUPABASE_URL}/functions/v1/save-square-card`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({ nonce, squareCustomerId: customerId }),
+        });
+
+        if (!saveResp.ok) {
+          const errData = await saveResp.json().catch(() => ({}));
+          showToast('error', (errData as any).error || 'Failed to save card');
+          return;
+        }
+
+        showToast('success', 'Card added successfully');
+        await loadStoredCards();
+      } catch (error: any) {
+        showToast('error', error.message || 'Failed to add card');
+      } finally {
+        setProcessing(false);
+      }
+    })();
+  }, [nonceReady]);
+
   const loadStoredCards = useCallback(async () => {
     if (!userProfile) return;
-    
+
     setLoading(true);
     try {
       const { data, error } = await supabase
         .from('payment_methods')
         .select('*')
         .eq('user_id', userProfile.id)
+        .not('stripe_payment_method_id', 'is', null)
         .order('is_default', { ascending: false })
         .order('created_at', { ascending: false });
 
       if (error) throw error;
 
-      if (!stripe) {
-        showToast('error', 'Payment system not ready. Try again.');
-        return;
-      }
-
-
-      if (data && data.length > 0) {
-        const cards: StoredCard[] = data.map((card: any) => ({
-          id: card.id,
-          stripePaymentMethodId: card.stripe_payment_method_id || '',
-          cardBrand: card.brand || 'card',
-          last4: card.last4 || '0000',
-          expMonth: card.exp_month || 0,
-          expYear: card.exp_year || 0,
-          isDefault: card.is_default || false,
-        }));
-        
-        setStoredCards(cards);
-      } else {
-        setStoredCards([]);
-      }
+      const cards: StoredCard[] = (data ?? []).map((card: any) => ({
+        id: card.id,
+        squareCardId: card.stripe_payment_method_id || '',
+        cardBrand: card.brand || 'UNKNOWN',
+        last4: card.last4 || '0000',
+        expMonth: card.exp_month || 0,
+        expYear: card.exp_year || 0,
+        isDefault: card.is_default || false,
+      }));
+      setStoredCards(cards);
     } catch (error) {
       console.error('Error loading stored cards:', error);
       showToast('error', 'Failed to load saved cards');
@@ -113,130 +190,38 @@ export default function PaymentMethodsScreen() {
   }, [userProfile, loadStoredCards]);
 
   const handleAddCard = async () => {
-    if (!cardComplete) {
-      showToast('error', 'Please enter complete card details');
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      showToast('error', 'Please sign in to continue.');
       return;
     }
 
-    try {
-      setProcessing(true);
+    sessionRef.current = session;
+    setProcessing(true);
 
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error('Not authenticated');
-
-      if (!stripe) {
-        showToast('error', 'Payment system not ready. Try again.');
-        return;
+    // The nonce callback must be synchronous — the Square native module blocks
+    // the JS microtask queue while the sheet is in "processing" state, so async
+    // work inside the callback never resolves until after manual dismissal.
+    // Instead: store the nonce, dismiss the sheet synchronously via
+    // completeCardEntry, then flip nonceReady to trigger the useEffect which
+    // runs all the API work in a clean post-render event loop tick.
+    squareSheetOpen.current = true;
+    SQIPCardEntry.startCardEntryFlow(
+      false,
+      (cardDetails: CardDetails) => {
+        squareSheetOpen.current = false;
+        pendingNonce.current = cardDetails.nonce;
+        SQIPCardEntry.completeCardEntry(() => {});
+        setNonceReady(true);
+      },
+      () => {
+        squareSheetOpen.current = false;
+        setProcessing(false);
       }
-
-      console.log('Creating setup intent...');
-
-      // Create setup intent (this will also create a Stripe customer if needed)
-      const setupIntentResponse = await fetch(`${SUPABASE_URL}/functions/v1/create-setup-intent`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`,
-        },
-      });
-
-      console.log('Setup intent response status:', setupIntentResponse.status);
-      
-      // Get the response text first
-      const responseText = await setupIntentResponse.text();
-      console.log('Setup intent response text:', responseText);
-
-      if (!setupIntentResponse.ok) {
-        let errorMessage = 'Failed to create setup intent';
-        try {
-          const errorData = JSON.parse(responseText);
-          errorMessage = errorData.error || errorMessage;
-        } catch (e) {
-          console.error('Failed to parse error response:', e);
-          errorMessage = responseText || errorMessage;
-        }
-        throw new Error(errorMessage);
-      }
-
-      let setupIntentData;
-      try {
-        setupIntentData = JSON.parse(responseText);
-      } catch (e) {
-        console.error('Failed to parse setup intent response:', e);
-        throw new Error('Invalid response from server');
-      }
-
-      const { clientSecret, customerId } = setupIntentData;
-      console.log('Setup intent created with customer:', customerId);
-
-      // Confirm setup intent with card details
-      console.log('Confirming setup intent...');
-      const { setupIntent, error: confirmError } = await stripe.confirmSetupIntent(
-        clientSecret,
-        {
-          paymentMethodType: 'Card',
-        }
-      );
-
-      if (confirmError) {
-        console.error('Confirm setup intent error:', confirmError);
-        throw new Error(confirmError.message);
-      }
-
-      console.log('Setup intent status:', setupIntent?.status);
-
-      if (
-          !setupIntent ||
-          !['Succeeded', 'RequiresAction', 'Processing'].includes(setupIntent.status)
-        ) {
-          throw new Error('Failed to save card');
-        }
-
-      console.log('Saving payment method to database...');
-
-      // Save payment method
-      const saveResponse = await fetch(`${SUPABASE_URL}/functions/v1/save-payment-method`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({
-          paymentMethodId: setupIntent.paymentMethod?.id,
-          setAsDefault: storedCards.length === 0,
-        }),
-      });
-
-      console.log('Save payment method response status:', saveResponse.status);
-
-      // Get the response text first
-      const saveResponseText = await saveResponse.text();
-      console.log('Save payment method response text:', saveResponseText);
-
-      if (!saveResponse.ok) {
-        let errorMessage = 'Failed to save payment method';
-        try {
-          const errorData = JSON.parse(saveResponseText);
-          errorMessage = errorData.error || errorMessage;
-        } catch (e) {
-          console.error('Failed to parse save error response:', e);
-          errorMessage = saveResponseText || errorMessage;
-        }
-        throw new Error(errorMessage);
-      }
-
-      showToast('success', 'Card added successfully');
-      setShowAddCard(false);
-      await loadStoredCards();
-    } catch (error: any) {
-      console.error('Error adding card:', error);
-      showToast('error', error.message || 'Failed to add card');
-    } finally {
-      setProcessing(false);
-    }
+    );
   };
 
-  const handleSetDefault = async (paymentMethodId: string) => {
+  const handleSetDefault = async (squareCardId: string) => {
     if (Platform.OS !== 'web') {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     }
@@ -247,39 +232,30 @@ export default function PaymentMethodsScreen() {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) throw new Error('Not authenticated');
 
-      const response = await fetch(`${SUPABASE_URL}/functions/v1/update-default-payment-method`, {
+      const response = await fetch(`${SUPABASE_URL}/functions/v1/update-default-square-card`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`,
+          Authorization: `Bearer ${session.access_token}`,
         },
-        body: JSON.stringify({ paymentMethodId }),
+        body: JSON.stringify({ squareCardId }),
       });
 
-      const responseText = await response.text();
-
       if (!response.ok) {
-        let errorMessage = 'Failed to update default payment method';
-        try {
-          const errorData = JSON.parse(responseText);
-          errorMessage = errorData.error || errorMessage;
-        } catch (e) {
-          errorMessage = responseText || errorMessage;
-        }
-        throw new Error(errorMessage);
+        const errData = await response.json().catch(() => ({}));
+        throw new Error((errData as any).error || 'Failed to update default card');
       }
 
       showToast('success', 'Default card updated successfully');
       await loadStoredCards();
     } catch (error: any) {
-      console.error('Error setting default card:', error);
       showToast('error', error.message || 'Failed to update default card');
     } finally {
       setProcessing(false);
     }
   };
 
-  const handleRemoveCard = (paymentMethodId: string) => {
+  const handleRemoveCard = (squareCardId: string) => {
     if (Platform.OS !== 'web') {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     }
@@ -299,32 +275,23 @@ export default function PaymentMethodsScreen() {
               const { data: { session } } = await supabase.auth.getSession();
               if (!session) throw new Error('Not authenticated');
 
-              const response = await fetch(`${SUPABASE_URL}/functions/v1/detach-payment-method`, {
+              const response = await fetch(`${SUPABASE_URL}/functions/v1/delete-square-card`, {
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',
-                  'Authorization': `Bearer ${session.access_token}`,
+                  Authorization: `Bearer ${session.access_token}`,
                 },
-                body: JSON.stringify({ paymentMethodId }),
+                body: JSON.stringify({ squareCardId }),
               });
 
-              const responseText = await response.text();
-
               if (!response.ok) {
-                let errorMessage = 'Failed to remove payment method';
-                try {
-                  const errorData = JSON.parse(responseText);
-                  errorMessage = errorData.error || errorMessage;
-                } catch (e) {
-                  errorMessage = responseText || errorMessage;
-                }
-                throw new Error(errorMessage);
+                const errData = await response.json().catch(() => ({}));
+                throw new Error((errData as any).error || 'Failed to remove card');
               }
 
               showToast('success', 'Payment method removed successfully');
               await loadStoredCards();
             } catch (error: any) {
-              console.error('Error removing card:', error);
               showToast('error', error.message || 'Failed to remove payment method');
             } finally {
               setProcessing(false);
@@ -333,15 +300,6 @@ export default function PaymentMethodsScreen() {
         },
       ]
     );
-  };
-
-  const getCardBrandIcon = (brand: string) => {
-    const brandLower = brand.toLowerCase();
-    if (brandLower.includes('visa')) return 'creditcard.fill';
-    if (brandLower.includes('mastercard')) return 'creditcard.fill';
-    if (brandLower.includes('amex') || brandLower.includes('american')) return 'creditcard.fill';
-    if (brandLower.includes('discover')) return 'creditcard.fill';
-    return 'creditcard';
   };
 
   return (
@@ -353,7 +311,6 @@ export default function PaymentMethodsScreen() {
     >
       <SafeAreaView style={styles.safeArea} edges={['top']}>
         <View style={styles.container}>
-          {/* Header with Gradient */}
           <LinearGradient
             colors={[currentColors.headerGradientStart || currentColors.card, currentColors.headerGradientEnd || currentColors.card]}
             start={{ x: 0, y: 0 }}
@@ -388,86 +345,33 @@ export default function PaymentMethodsScreen() {
             >
               <IconSymbol name="info.circle.fill" size={20} color={currentColors.secondary} />
               <Text style={[styles.infoText, { color: currentColors.text }]}>
-                Securely save your payment methods for faster checkout. Your card information is encrypted and stored by Stripe.
+                Securely save your payment methods for faster checkout. Your card information is encrypted and stored by Square.
               </Text>
             </LinearGradient>
 
-            {showAddCard && (
-              <LinearGradient
-                colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={[styles.addCardForm, { borderColor: currentColors.border }]}
+            <LinearGradient
+              colors={[currentColors.secondary, currentColors.highlight]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={styles.addNewButton}
+            >
+              <Pressable
+                style={styles.addNewButtonInner}
+                onPress={handleAddCard}
+                disabled={processing}
               >
-                <Text style={[styles.addCardTitle, { color: currentColors.text }]}>Add New Card</Text>
-                <CardField
-                  postalCodeEnabled={false}
-                  placeholders={{
-                    number: '4242 4242 4242 4242',
-                  }}
-                  cardStyle={{
-                    backgroundColor: currentColors.background,
-                    textColor: currentColors.text,
-                  }}
-                  style={styles.cardField}
-                  onCardChange={(cardDetails) => {
-                    setCardComplete(cardDetails.complete);
-                  }}
-                />
-                <View style={styles.addCardButtons}>
-                  <Pressable
-                    style={[styles.cancelButton, { backgroundColor: currentColors.background, borderColor: currentColors.border }]}
-                    onPress={() => setShowAddCard(false)}
-                    disabled={processing}
-                  >
-                    <Text style={[styles.cancelButtonText, { color: currentColors.text }]}>Cancel</Text>
-                  </Pressable>
-                  <LinearGradient
-                    colors={[currentColors.secondary, currentColors.highlight]}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 0 }}
-                    style={[styles.saveButton, { opacity: processing || !cardComplete ? 0.5 : 1 }]}
-                  >
-                    <Pressable
-                      style={styles.saveButtonInner}
-                      onPress={handleAddCard}
-                      disabled={processing || !cardComplete}
-                    >
-                      {processing ? (
-                        <ActivityIndicator color={currentColors.background} />
-                      ) : (
-                        <Text style={[styles.saveButtonText, { color: currentColors.background }]}>Save Card</Text>
-                      )}
-                    </Pressable>
-                  </LinearGradient>
-                </View>
-              </LinearGradient>
-            )}
-
-            {!showAddCard && (
-              <LinearGradient
-                colors={[currentColors.secondary, currentColors.highlight]}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-                style={styles.addNewButton}
-              >
-                <Pressable
-                  style={styles.addNewButtonInner}
-                  onPress={() => {
-                    if (Platform.OS !== 'web') {
-                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                    }
-                    setShowAddCard(true);
-                  }}
-                  disabled={processing}
-                >
-                  <IconSymbol name="add" size={24} color={currentColors.background} />
-                  <Text style={[styles.addNewButtonText, { color: currentColors.background }]}>
-                    Add New Card
-                  </Text>
-                </Pressable>
-              </LinearGradient>
-            )}
+                {processing ? (
+                  <ActivityIndicator color={currentColors.background} />
+                ) : (
+                  <>
+                    <IconSymbol name="add" size={24} color={currentColors.background} />
+                    <Text style={[styles.addNewButtonText, { color: currentColors.background }]}>
+                      Add New Card
+                    </Text>
+                  </>
+                )}
+              </Pressable>
+            </LinearGradient>
 
             {loading ? (
               <View style={styles.loadingContainer}>
@@ -476,7 +380,7 @@ export default function PaymentMethodsScreen() {
                   Loading saved cards...
                 </Text>
               </View>
-            ) : storedCards.length === 0 && !showAddCard ? (
+            ) : storedCards.length === 0 ? (
               <View style={styles.emptyState}>
                 <IconSymbol name="creditcard" size={80} color={currentColors.textSecondary} />
                 <Text style={[styles.emptyStateTitle, { color: currentColors.text }]}>No Payment Methods</Text>
@@ -496,7 +400,7 @@ export default function PaymentMethodsScreen() {
                   >
                     <View style={styles.cardInfo}>
                       <View style={[styles.iconContainer, { borderColor: currentColors.border }]}>
-                        <IconSymbol name={getCardBrandIcon(card.cardBrand)} size={32} color={currentColors.secondary} />
+                        <IconSymbol name="creditcard.fill" size={32} color={currentColors.secondary} />
                       </View>
                       <View style={styles.cardDetails}>
                         <Text style={[styles.cardNumber, { color: currentColors.text }]}>
@@ -519,7 +423,7 @@ export default function PaymentMethodsScreen() {
                         </LinearGradient>
                       ) : (
                         <Pressable
-                          onPress={() => handleSetDefault(card.stripePaymentMethodId)}
+                          onPress={() => handleSetDefault(card.squareCardId)}
                           style={styles.setDefaultButton}
                           disabled={processing}
                         >
@@ -529,7 +433,7 @@ export default function PaymentMethodsScreen() {
                         </Pressable>
                       )}
                       <Pressable
-                        onPress={() => handleRemoveCard(card.stripePaymentMethodId)}
+                        onPress={() => handleRemoveCard(card.squareCardId)}
                         style={styles.removeButton}
                         disabled={processing}
                       >
@@ -549,7 +453,7 @@ export default function PaymentMethodsScreen() {
             </View>
           </ScrollView>
         </View>
-        
+
         <Toast
           visible={toastVisible}
           message={toastMessage}
@@ -571,15 +475,9 @@ export default function PaymentMethodsScreen() {
 }
 
 const styles = StyleSheet.create({
-  gradientContainer: {
-    flex: 1,
-  },
-  safeArea: {
-    flex: 1,
-  },
-  container: {
-    flex: 1,
-  },
+  gradientContainer: { flex: 1 },
+  safeArea: { flex: 1 },
+  container: { flex: 1 },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -608,197 +506,31 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 2 },
     textShadowRadius: 4,
   },
-  scrollView: {
-    flex: 1,
-  },
-  scrollContent: {
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 40,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingVertical: 60,
-  },
-  loadingText: {
-    marginTop: 16,
-    fontSize: 16,
-    fontFamily: 'Inter_400Regular',
-  },
-  emptyState: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 60,
-  },
-  emptyStateTitle: {
-    fontSize: 24,
-    fontFamily: 'PlayfairDisplay_700Bold',
-    marginTop: 20,
-    marginBottom: 8,
-  },
-  emptyStateText: {
-    fontSize: 14,
-    fontFamily: 'Inter_400Regular',
-    textAlign: 'center',
-    paddingHorizontal: 40,
-  },
-  cardsContainer: {
-    marginBottom: 20,
-  },
-  cardItem: {
-    borderRadius: 0,
-    padding: 20,
-    marginBottom: 16,
-    borderWidth: 2,
-    boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.3)',
-    elevation: 8,
-  },
-  cardInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  iconContainer: {
-    borderRadius: 0,
-    overflow: 'hidden',
-    borderWidth: 2,
-    padding: 8,
-    boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.2)',
-    elevation: 0,
-  },
-  cardDetails: {
-    flex: 1,
-    marginLeft: 16,
-  },
-  cardNumber: {
-    fontSize: 16,
-    fontFamily: 'PlayfairDisplay_700Bold',
-    marginBottom: 4,
-  },
-  cardExpiry: {
-    fontSize: 14,
-    fontFamily: 'Inter_400Regular',
-  },
-  cardActions: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  defaultBadge: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 0,
-    boxShadow: '0px 4px 12px rgba(212, 175, 55, 0.25)',
-    elevation: 4,
-  },
-  defaultBadgeText: {
-    fontSize: 12,
-    fontFamily: 'Inter_600SemiBold',
-  },
-  setDefaultButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-  },
-  setDefaultText: {
-    fontSize: 14,
-    fontFamily: 'Inter_600SemiBold',
-  },
-  removeButton: {
-    padding: 8,
-  },
-  addNewButton: {
-    borderRadius: 0,
-    marginBottom: 20,
-    boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.4)',
-    elevation: 8,
-  },
-  addNewButtonInner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 16,
-    paddingHorizontal: 20,
-    gap: 8,
-  },
-  addNewButtonText: {
-    fontSize: 16,
-    fontFamily: 'Inter_700Bold',
-  },
-  addCardForm: {
-    borderRadius: 0,
-    padding: 20,
-    marginBottom: 20,
-    borderWidth: 2,
-    boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.3)',
-    elevation: 8,
-  },
-  addCardTitle: {
-    fontSize: 18,
-    fontFamily: 'PlayfairDisplay_700Bold',
-    marginBottom: 16,
-  },
-  cardField: {
-    height: 50,
-    marginBottom: 16,
-  },
-  addCardButtons: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  cancelButton: {
-    flex: 1,
-    padding: 16,
-    borderRadius: 0,
-    alignItems: 'center',
-    borderWidth: 2,
-    boxShadow: '0px 4px 12px rgba(212, 175, 55, 0.25)',
-    elevation: 4,
-  },
-  cancelButtonText: {
-    fontSize: 16,
-    fontFamily: 'Inter_600SemiBold',
-  },
-  saveButton: {
-    flex: 1,
-    borderRadius: 0,
-    boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.4)',
-    elevation: 8,
-  },
-  saveButtonInner: {
-    padding: 16,
-    alignItems: 'center',
-  },
-  saveButtonText: {
-    fontSize: 16,
-    fontFamily: 'Inter_700Bold',
-  },
-  infoCard: {
-    flexDirection: 'row',
-    padding: 16,
-    borderRadius: 0,
-    gap: 12,
-    marginBottom: 20,
-    borderWidth: 2,
-    boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.3)',
-    elevation: 8,
-  },
-  infoText: {
-    flex: 1,
-    fontSize: 14,
-    fontFamily: 'Inter_400Regular',
-    lineHeight: 20,
-  },
-  securityNote: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 16,
-    gap: 8,
-  },
-  securityNoteText: {
-    fontSize: 14,
-    fontFamily: 'Inter_400Regular',
-  },
+  scrollView: { flex: 1 },
+  scrollContent: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 40 },
+  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingVertical: 60 },
+  loadingText: { marginTop: 16, fontSize: 16, fontFamily: 'Inter_400Regular' },
+  emptyState: { alignItems: 'center', justifyContent: 'center', paddingVertical: 60 },
+  emptyStateTitle: { fontSize: 24, fontFamily: 'PlayfairDisplay_700Bold', marginTop: 20, marginBottom: 8 },
+  emptyStateText: { fontSize: 14, fontFamily: 'Inter_400Regular', textAlign: 'center', paddingHorizontal: 40 },
+  cardsContainer: { marginBottom: 20 },
+  cardItem: { borderRadius: 0, padding: 20, marginBottom: 16, borderWidth: 2, boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.3)', elevation: 8 },
+  cardInfo: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
+  iconContainer: { borderRadius: 0, overflow: 'hidden', borderWidth: 2, padding: 8, boxShadow: '0px 4px 12px rgba(0, 0, 0, 0.2)', elevation: 0 },
+  cardDetails: { flex: 1, marginLeft: 16 },
+  cardNumber: { fontSize: 16, fontFamily: 'PlayfairDisplay_700Bold', marginBottom: 4 },
+  cardExpiry: { fontSize: 14, fontFamily: 'Inter_400Regular' },
+  cardActions: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  defaultBadge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 0, boxShadow: '0px 4px 12px rgba(212, 175, 55, 0.25)', elevation: 4 },
+  defaultBadgeText: { fontSize: 12, fontFamily: 'Inter_600SemiBold' },
+  setDefaultButton: { paddingHorizontal: 12, paddingVertical: 6 },
+  setDefaultText: { fontSize: 14, fontFamily: 'Inter_600SemiBold' },
+  removeButton: { padding: 8 },
+  addNewButton: { borderRadius: 0, marginBottom: 20, boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.4)', elevation: 8 },
+  addNewButtonInner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 16, paddingHorizontal: 20, gap: 8 },
+  addNewButtonText: { fontSize: 16, fontFamily: 'Inter_700Bold' },
+  infoCard: { flexDirection: 'row', padding: 16, borderRadius: 0, gap: 12, marginBottom: 20, borderWidth: 2, boxShadow: '0px 8px 24px rgba(212, 175, 55, 0.3)', elevation: 8 },
+  infoText: { flex: 1, fontSize: 14, fontFamily: 'Inter_400Regular', lineHeight: 20 },
+  securityNote: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: 16, gap: 8 },
+  securityNoteText: { fontSize: 14, fontFamily: 'Inter_400Regular' },
 });

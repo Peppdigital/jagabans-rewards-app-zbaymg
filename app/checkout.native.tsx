@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
   FlatList,
   Keyboard,
+  AppState,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -18,7 +19,7 @@ import { IconSymbol } from '@/components/IconSymbol';
 import * as Haptics from 'expo-haptics';
 import Toast from '@/components/Toast';
 import { SUPABASE_URL, supabase } from '@/app/integrations/supabase/client';
-import { StripeProvider, useStripe } from '@stripe/stripe-react-native';
+import { SQIPCore, SQIPCardEntry, type CardDetails } from '@/utils/squareInAppPayments';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Linking from 'expo-linking';
 import {appConfigService} from '@/services/supabaseService';
@@ -67,6 +68,17 @@ interface OutsideRadiusError {
   distanceMiles: number;
   radiusMiles: number;
   message: string;
+}
+
+interface SavedCard {
+  id: string;
+  squareCardId: string;
+  squareCustomerId: string;
+  brand: string;
+  last4: string;
+  expMonth: number;
+  expYear: number;
+  isDefault: boolean;
 }
 
 // ── Google Places types ────────────────────────────────────────────────────
@@ -124,16 +136,12 @@ interface Order {
 // CONSTANTS
 // ============================================================================
 
-const STRIPE_PUBLISHABLE_KEY =
-  process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY ||
-  '';
-
 // Replace with your actual Google Places API key
 const GOOGLE_PLACES_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_PLACES_API_KEY || '';
 
-const POINTS_TO_DOLLAR_RATE = 0.01;
-const DISCOUNT_PERCENTAGE = 0.10;
-const POINTS_REWARD_PERCENTAGE = 0.05;
+// const POINTS_TO_DOLLAR_RATE = 0.01;
+// const DISCOUNT_PERCENTAGE = 0.10;
+// const POINTS_REWARD_PERCENTAGE = 0.05;
 const QUOTE_REFRESH_BUFFER_MS = 60_000;
 const FALLBACK_DELIVERY_FEE = 19.99; // applied when Uber quote is unavailable
 
@@ -152,7 +160,19 @@ function CheckoutContent() {
     loadUserProfile,
   } = useApp();
 
-  const { initPaymentSheet, presentPaymentSheet } = useStripe();
+  const [squareInitialized, setSquareInitialized] = useState(false);
+
+  // ── Saved cards ───────────────────────────────────────────────────────────
+  const [savedCards, setSavedCards] = useState<SavedCard[]>([]);
+  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+  const [loadingCards, setLoadingCards] = useState(false);
+
+  // Refs for new-card checkout flow (same pattern as payment-methods screen)
+  const pendingNonce = useRef<string | null>(null);
+  const pendingPaymentBody = useRef<any>(null);
+  const checkoutSessionRef = useRef<any>(null);
+  const [checkoutNonceReady, setCheckoutNonceReady] = useState(false);
+  const squareSheetOpen = useRef(false);
 
   // ── State ─────────────────────────────────────────────────────────────────
 
@@ -565,165 +585,253 @@ const pointsToEarn = appPointsEnabled
     return () => setTabBarVisible(true);
   }, [setTabBarVisible]);
 
-  // ── Payment sheet ─────────────────────────────────────────────────────────
+  // ── Square SDK initialization ─────────────────────────────────────────────
 
-  const initializePaymentSheet = useCallback(async () => {
-  if (!userProfile) throw new Error('User profile not found');
-
-  const { data: { session } } = await supabase.auth.getSession();
-  if (!session) throw new Error('Not authenticated');
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('User not found');
-
-  const { data: customerData } = await supabase
-    .from('user_profiles')
-    .select('stripe_customer_id')
-    .eq('user_id', user.id)
-    .single<{ stripe_customer_id: string | null }>();
-
-  let customerId = customerData?.stripe_customer_id;
-
-  if (!customerId) {
-    const res = await fetch(`${SUPABASE_URL}/functions/v1/create-stripe-customer`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-      body: JSON.stringify({ email: userProfile?.email || user.email, name: userProfile?.name }),
-    });
-    if (!res.ok) throw new Error('Failed to create Stripe customer');
-    const { customerId: newId } = await res.json();
-    customerId = newId;
-  }
-
-  if (orderType === 'delivery' && deliveryQuote && isQuoteExpired()) {
-    const addr = validatedAddress || deliveryAddress;
-    if (addr) await fetchDeliveryQuote(addr, validatedUberAddress || undefined);
-  }
-
-  const pointsUsed = usePoints ? Math.floor(pointsDiscount / POINTS_TO_DOLLAR_RATE) : 0;
-  const orderItems = cart.map((item) => ({
-    id: item.id, name: item.name, price: item.price, quantity: item.quantity,
-  }));
-
-  // ── Full order snapshot — goes to pending_orders, NOT Stripe metadata ──
-  const pendingOrderPayload = {
-    order_type: orderType,
-    delivery_address: orderType === 'delivery' ? (validatedAddress || deliveryAddress) : '',
-    delivery_address_uber: orderType === 'delivery' ? (validatedUberAddress || '') : '',
-    pickup_notes: pickupNotes || '',
-    items: orderItems,           // full objects, no JSON.stringify needed
-    subtotal: subtotal,
-    tax: tax,
-    delivery_fee: deliveryFee,
-    total: total,
-    discount: discount,
-    points_earned: pointsToEarn,
-    points_used: pointsUsed,
-    points_discount: pointsDiscount,
-    customer_name: userProfile?.name || '',
-    customer_email: (orderType === 'delivery' ? deliveryEmail : userProfile?.email) || user.email || '',
-    customer_phone: orderType === 'delivery'
-      ? `${phoneCountryCode}${phoneNumber}`
-      : (userProfile?.phone || ''),
-    uber_quote_id: deliveryQuote?.quoteId || '',
-  };
-
-  const response = await fetch(`${SUPABASE_URL}/functions/v1/create-payment-intent`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-    body: JSON.stringify({
-      amount: Math.round(total * 100),
-      currency: 'usd',
-      customerId,
-      setupFutureUsage: 'off_session',
-      pendingOrder: pendingOrderPayload,  // ← replaces the old metadata blob
-    }),
-  });
-
-  if (!response.ok) throw new Error('Failed to create payment intent');
-  return response.json();
-}, [
-  total, orderType, cart, userProfile, validatedAddress, deliveryAddress, validatedUberAddress, pickupNotes,
-  subtotal, tax, discount, deliveryFee, pointsToEarn, usePoints, pointsDiscount,
-  deliveryQuote, isQuoteExpired, fetchDeliveryQuote, deliveryEmail, phoneCountryCode, phoneNumber,
-]);
-
-  // ── Order polling ─────────────────────────────────────────────────────────
-
-  const waitForOrderCreation = useCallback(async (paymentIntentId: string): Promise<string> => {
-    for (let attempt = 0; attempt < 30; attempt++) {
-      const { data: order } = await supabase
-        .from('orders')
-        .select('id, order_type')
-        .eq('payment_id', paymentIntentId)
-        .maybeSingle<Order>();
-
-      if (order?.id) return order.id;
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+  useEffect(() => {
+    const appId = process.env.EXPO_PUBLIC_SQUARE_APPLICATION_ID;
+    if (!appId) {
+      console.warn('[Square] EXPO_PUBLIC_SQUARE_APPLICATION_ID is not set.');
+      return;
     }
-    throw new Error(
-      'Order creation timed out. Your payment was successful. Contact support with payment ID: ' +
-        paymentIntentId
-    );
+    try {
+      SQIPCore.setSquareApplicationId(appId);
+      setSquareInitialized(true);
+    } catch (err) {
+      console.error('[Square] Native module not available — rebuild required:', err);
+    }
   }, []);
+
+  // ── Reset processing state if Square sheet was dismissed via back button ──
+  // On Android the Square card entry runs as a separate Activity. Pressing
+  // back closes it without invoking the JS cancel callback, so AppState
+  // fires 'active' when the RN Activity resumes. We use squareSheetOpen to
+  // distinguish this case from any other foreground event.
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active' && squareSheetOpen.current) {
+        squareSheetOpen.current = false;
+        setProcessing(false);
+        pendingPaymentBody.current = null;
+        checkoutSessionRef.current = null;
+      }
+    });
+    return () => sub.remove();
+  }, []);
+
+  // ── Load saved payment methods ────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!userProfile) return;
+    setLoadingCards(true);
+    supabase
+      .from('payment_methods')
+      .select('*')
+      .eq('user_id', userProfile.id)
+      .not('stripe_payment_method_id', 'is', null)
+      .order('is_default', { ascending: false })
+      .order('created_at', { ascending: false })
+      .then(({ data }) => {
+        const cards: SavedCard[] = (data ?? []).map((c: any) => ({
+          id: c.id,
+          squareCardId: c.stripe_payment_method_id,
+          squareCustomerId: c.stripe_customer_id,
+          brand: c.brand || 'CARD',
+          last4: c.last4 || '••••',
+          expMonth: c.exp_month,
+          expYear: c.exp_year,
+          isDefault: c.is_default,
+        }));
+        setSavedCards(cards);
+        const defaultCard = cards.find((c) => c.isDefault) ?? cards[0];
+        if (defaultCard) setSelectedCardId(defaultCard.squareCardId);
+      })
+      .finally(() => setLoadingCards(false));
+  }, [userProfile]);
+
+  // ── Process payment after Square sheet dismisses (new card path) ──────────
+
+  useEffect(() => {
+    if (!checkoutNonceReady) return;
+    setCheckoutNonceReady(false);
+
+    const nonce = pendingNonce.current;
+    const body = pendingPaymentBody.current;
+    const session = checkoutSessionRef.current;
+
+    if (!nonce || !body || !session) { setProcessing(false); return; }
+    pendingNonce.current = null;
+    pendingPaymentBody.current = null;
+
+    (async () => {
+      try {
+        const response = await fetch(`${SUPABASE_URL}/functions/v1/process-square-payment`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+          body: JSON.stringify({ sourceId: nonce, ...body }),
+        });
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          showToast('error', (errData as any).error || `Payment failed (${response.status})`);
+          setProcessing(false);
+          return;
+        }
+
+        const data = await response.json();
+        if (!data.success) { showToast('error', data.error || 'Payment failed'); setProcessing(false); return; }
+
+        showToast('success', 'Payment successful!');
+        clearCart();
+        loadUserProfile();
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        setTimeout(() => { setProcessing(false); router.push({ pathname: '/order-confirmation', params: { orderId: data.orderId } }); }, 100);
+      } catch (err: any) {
+        showToast('error', err.message || 'Payment failed');
+        setProcessing(false);
+      }
+    })();
+  }, [checkoutNonceReady]);
 
   // ── Order placement ───────────────────────────────────────────────────────
 
   const proceedWithPayment = useCallback(async () => {
+    if (!squareInitialized) {
+      showToast('error', 'Payment system not ready. Please try again.');
+      return;
+    }
+
+    if (orderType === 'delivery' && deliveryQuote && isQuoteExpired()) {
+      const addr = validatedAddress || deliveryAddress;
+      if (addr) await fetchDeliveryQuote(addr, validatedUberAddress || undefined);
+    }
+
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      showToast('error', 'Please sign in to continue.');
+      return;
+    }
+
+    // Capture order values before the card entry sheet opens
+    const customerEmail = (orderType === 'delivery' ? deliveryEmail : userProfile?.email) || '';
+    const customerPhone = orderType === 'delivery'
+      ? `${phoneCountryCode}${phoneNumber}`
+      : (userProfile?.phone || '');
+    const deliveryAddrFull = validatedAddress || deliveryAddress;
+
+    let addressCity = '', addressState = '', addressZip = '';
+    if (validatedUberAddress) {
+      try {
+        const ua = JSON.parse(validatedUberAddress);
+        addressCity  = ua.city      || '';
+        addressState = ua.state     || '';
+        addressZip   = ua.zip_code  || '';
+      } catch { /* fallback */ }
+    }
+
+    const paymentBody = {
+      amount:       Math.round(total * 100),
+      subtotal:     Math.round(subtotal * 100),
+      taxAmount:    Math.round(tax * 100),
+      currency:     'USD',
+      customer: {
+        name:         userProfile?.name || '',
+        email:        customerEmail,
+        phone:        customerPhone,
+        deliveryType: orderType,
+        ...(orderType === 'delivery' ? {
+          address:              deliveryAddrFull,
+          city:                 addressCity,
+          state:                addressState,
+          zip:                  addressZip,
+          deliveryInstructions: pickupNotes || undefined,
+        } : {
+          pickupDate: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }),
+          pickupTime: 'ASAP',
+        }),
+      },
+      items: cart.map((item) => ({
+        id:       String(item.id),
+        name:     item.name,
+        quantity: item.quantity,
+        price:    item.price,
+      })),
+      orderType,
+      deliveryAddress: orderType === 'delivery' ? deliveryAddrFull : undefined,
+      pickupNotes:     orderType === 'pickup' ? (pickupNotes || undefined) : undefined,
+      deliveryQuoteId: deliveryQuote?.quoteId || null,
+      deliveryFee,
+      deliveryFeeCents:      Math.round(deliveryFee * 100),
+      discountAmount:        Math.round(discount * 100),
+      pointsDiscountAmount:  Math.round(pointsDiscount * 100),
+    };
+
     setProcessing(true);
-    try {
-      const paymentData = await initializePaymentSheet();
-      if (!paymentData) throw new Error('Failed to initialize payment');
 
-      const { clientSecret, ephemeralKey, paymentIntentId, customerId } = paymentData;
-      const returnURL = Linking.createURL('checkout');
+    // ── Saved card path: direct API call, no Square native UI ────────────
+    if (selectedCardId) {
+      const card = savedCards.find((c) => c.squareCardId === selectedCardId);
+      try {
+        const response = await fetch(`${SUPABASE_URL}/functions/v1/process-square-payment`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+          body: JSON.stringify({
+            sourceId: selectedCardId,
+            customerId: card?.squareCustomerId,
+            ...paymentBody,
+          }),
+        });
 
-      const initConfig: any = {
-        merchantDisplayName: 'Jagabans LA',
-        paymentIntentClientSecret: clientSecret,
-        allowsDelayedPaymentMethods: false,
-        returnURL,
-        defaultBillingDetails: { name: userProfile?.name, email: userProfile?.email },
-        googlePay: { merchantCountryCode: 'US', testEnv: false, currencyCode: 'usd' },
-      };
-
-      if (customerId && ephemeralKey) {
-        initConfig.customerId = customerId;
-        initConfig.customerEphemeralKeySecret = ephemeralKey;
-      }
-
-      const { error: initError } = await initPaymentSheet(initConfig);
-      if (initError) throw new Error(initError.message);
-
-      const { error: presentError } = await presentPaymentSheet();
-      if (presentError) {
-        if (presentError.code === 'Canceled') {
-          showToast('info', 'Payment cancelled');
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          showToast('error', (errData as any).error || `Payment failed (${response.status})`);
           setProcessing(false);
           return;
         }
-        throw new Error(presentError.message);
-      }
 
-      showToast('success', 'Payment successful! Creating your order...');
+        const data = await response.json();
+        if (!data.success) { showToast('error', data.error || 'Payment failed'); setProcessing(false); return; }
 
-      const orderId = await waitForOrderCreation(paymentIntentId);
-
-      clearCart();
-      await loadUserProfile();
-
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setTimeout(() => {
+        showToast('success', 'Payment successful!');
+        clearCart();
+        loadUserProfile();
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        setTimeout(() => { setProcessing(false); router.push({ pathname: '/order-confirmation', params: { orderId: data.orderId } }); }, 100);
+      } catch (err: any) {
+        showToast('error', err.message || 'Payment failed');
         setProcessing(false);
-        router.push({ pathname: '/order-confirmation', params: { orderId } });
-      }, 100);
-    } catch (error) {
-      showToast('error', error instanceof Error ? error.message : 'Failed to place order. Please try again.');
-      setProcessing(false);
+      }
+      return;
     }
+
+    // ── New card path: Square card entry sheet ────────────────────────────
+    // completeCardEntry is called synchronously so the sheet dismisses before
+    // the fetch runs (same pattern as payment-methods screen).
+    pendingPaymentBody.current = paymentBody;
+    checkoutSessionRef.current = session;
+
+    squareSheetOpen.current = true;
+    SQIPCardEntry.startCardEntryFlow(
+      false,
+      (cardDetails: CardDetails) => {
+        squareSheetOpen.current = false;
+        pendingNonce.current = cardDetails.nonce;
+        SQIPCardEntry.completeCardEntry(() => {});
+        setCheckoutNonceReady(true);
+      },
+      () => {
+        squareSheetOpen.current = false;
+        setProcessing(false);
+        pendingPaymentBody.current = null;
+        checkoutSessionRef.current = null;
+      }
+    );
   }, [
-    initializePaymentSheet, initPaymentSheet, presentPaymentSheet,
-    waitForOrderCreation, clearCart, loadUserProfile, router, showToast, userProfile,
+    squareInitialized, orderType, cart, userProfile, validatedAddress, deliveryAddress,
+    validatedUberAddress, pickupNotes, subtotal, tax, total, deliveryFee,
+    deliveryQuote, isQuoteExpired, fetchDeliveryQuote,
+    deliveryEmail, phoneCountryCode, phoneNumber, showToast, clearCart, loadUserProfile, router,
+    selectedCardId, savedCards,
   ]);
 
   const handlePlaceOrder = useCallback(async () => {
@@ -1163,7 +1271,7 @@ const pointsToEarn = appPointsEnabled
             >
               <IconSymbol name="info" size={20} color={currentColors.primary} />
               <Text style={styles.infoText}>
-                Secure checkout powered by Stripe. Your payment information is encrypted and protected. Enjoy {appDiscountPct * 100}% off your order!
+                Secure checkout powered by Square. Your payment information is encrypted and protected. Enjoy {appDiscountPct * 100}% off your order!
               </Text>
             </LinearGradient>
 
@@ -1417,16 +1525,71 @@ const pointsToEarn = appPointsEnabled
             {/* Payment Method */}
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Payment Method</Text>
-              <LinearGradient
-                colors={[currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
-                start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
-                style={styles.paymentMethodsInfo}
-              >
-                <IconSymbol name="payment" size={24} color={currentColors.primary} />
-                <Text style={styles.paymentMethodsInfoText}>
-                  Choose from saved cards, Apple Pay, Google Pay, and more when you proceed to checkout.
-                </Text>
-              </LinearGradient>
+              {loadingCards ? (
+                <ActivityIndicator size="small" color={currentColors.secondary} style={{ marginVertical: 12 }} />
+              ) : (
+                <>
+                  {savedCards.map((card) => (
+                    <Pressable
+                      key={card.id}
+                      onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setSelectedCardId(card.squareCardId); }}
+                      disabled={processing}
+                    >
+                      <LinearGradient
+                        colors={selectedCardId === card.squareCardId
+                          ? [currentColors.secondary, currentColors.highlight]
+                          : [currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
+                        start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+                        style={[styles.paymentMethodsInfo, { marginBottom: 8, borderColor: selectedCardId === card.squareCardId ? currentColors.secondary : currentColors.border }]}
+                      >
+                        <IconSymbol name="creditcard.fill" size={22} color={selectedCardId === card.squareCardId ? currentColors.background : currentColors.secondary} />
+                        <View style={{ flex: 1 }}>
+                          <Text style={[styles.paymentMethodsInfoText, { fontFamily: 'Inter_600SemiBold', color: selectedCardId === card.squareCardId ? currentColors.background : currentColors.text }]}>
+                            {card.brand.toUpperCase()} •••• {card.last4}
+                          </Text>
+                          <Text style={[styles.paymentMethodsInfoText, { fontSize: 12, color: selectedCardId === card.squareCardId ? currentColors.background : currentColors.textSecondary }]}>
+                            Expires {String(card.expMonth).padStart(2, '0')}/{card.expYear}
+                            {card.isDefault ? ' · Default' : ''}
+                          </Text>
+                        </View>
+                        {selectedCardId === card.squareCardId && (
+                          <IconSymbol name="checkmark.circle.fill" size={20} color={currentColors.background} />
+                        )}
+                      </LinearGradient>
+                    </Pressable>
+                  ))}
+
+                  <Pressable
+                    onPress={() => {
+                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                      if (selectedCardId === null) {
+                        // Already selected — pressing again triggers the order flow directly
+                        handlePlaceOrder();
+                      } else {
+                        // Switch from saved card to new card mode
+                        setSelectedCardId(null);
+                      }
+                    }}
+                    disabled={processing}
+                  >
+                    <LinearGradient
+                      colors={selectedCardId === null
+                        ? [currentColors.secondary, currentColors.highlight]
+                        : [currentColors.cardGradientStart || currentColors.card, currentColors.cardGradientEnd || currentColors.card]}
+                      start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+                      style={[styles.paymentMethodsInfo, { borderColor: selectedCardId === null ? currentColors.secondary : currentColors.border }]}
+                    >
+                      <IconSymbol name="add" size={22} color={selectedCardId === null ? currentColors.background : currentColors.secondary} />
+                      <Text style={[styles.paymentMethodsInfoText, { fontFamily: 'Inter_600SemiBold', color: selectedCardId === null ? currentColors.background : currentColors.text }]}>
+                        {savedCards.length > 0 ? 'Add a new card' : 'Enter card details'}
+                      </Text>
+                      {selectedCardId === null && (
+                        <IconSymbol name="checkmark.circle.fill" size={20} color={currentColors.background} />
+                      )}
+                    </LinearGradient>
+                  </Pressable>
+                </>
+              )}
             </View>
 
             {/* Order Summary */}
@@ -1545,9 +1708,5 @@ const pointsToEarn = appPointsEnabled
 // ============================================================================
 
 export default function CheckoutScreen() {
-  return (
-    <StripeProvider publishableKey={STRIPE_PUBLISHABLE_KEY}>
-      <CheckoutContent />
-    </StripeProvider>
-  );
+  return <CheckoutContent />;
 }
