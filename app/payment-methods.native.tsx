@@ -72,6 +72,20 @@ export default function PaymentMethodsScreen() {
     if (appId) {
       try {
         SQIPCore.setSquareApplicationId(appId);
+        if (Platform.OS === 'ios') {
+          SQIPCardEntry.setIOSCardEntryTheme({
+            backgroundColor: { r: 42, g: 34, b: 24, a: 1.0 },       // card #2A2218
+            textColor: { r: 255, g: 255, b: 255, a: 1.0 },            // warm white
+            placeholderTextColor: { r: 184, g: 168, b: 136, a: 1.0 }, // #B8A888
+            tintColor: { r: 74, g: 215, b: 194, a: 1.0 },             // teal #4AD7C2
+            messageColor: { r: 184, g: 168, b: 136, a: 1.0 },
+            errorColor: { r: 255, g: 59, b: 48, a: 1.0 },
+            saveButtonTitle: 'Continue',
+            saveButtonTextColor: { r: 74, g: 215, b: 194, a: 1.0 },   // teal
+            saveButtonFont: { size: 16 },
+            keyboardAppearance: 'Dark',
+          });
+        }
       } catch (err) {
         console.error('[Square] Native module not available — rebuild required:', err);
       }

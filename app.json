@@ -41,7 +41,8 @@
           }
         }
       ],
-      "expo-sharing"
+      "expo-sharing",
+      "./plugins/withSquareSDKFix"
     ],
     "scheme": "jagabansla",
     "experiments": {
