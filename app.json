@@ -2,7 +2,7 @@
   "expo": {
     "name": "Jagabans L.A",
     "slug": "ooosum-foods-llc",
-    "version": "1.9.4",
+    "version": "1.10.4",
     "orientation": "portrait",
     "icon": "./assets/images/jagabans-circle.png",
     "userInterfaceStyle": "automatic",
@@ -42,7 +42,12 @@
         }
       ],
       "expo-sharing",
-      "./plugins/withSquareSDKFix"
+      [
+        "react-native-square-in-app-payments/app.plugin.js",
+        {
+          "merchantIdentifier": "com.ooosumfoods.jagabansla"
+        }
+      ]
     ],
     "scheme": "jagabansla",
     "experiments": {
