@@ -8,7 +8,6 @@ import {
   Pressable,
   Platform,
   ActivityIndicator,
-  AppState,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -18,8 +17,8 @@ import * as Haptics from 'expo-haptics';
 import Toast from '@/components/Toast';
 import Dialog from '@/components/Dialog';
 import { supabase, SUPABASE_URL } from '@/app/integrations/supabase/client';
-import { SQIPCore, SQIPCardEntry, type CardDetails, type NonceSuccessResult } from '@/utils/squareInAppPayments';
 import { LinearGradient } from 'expo-linear-gradient';
+import SquareWebCardEntry from '@/components/SquareWebCardEntry';
 
 interface StoredCard {
   id: string;
@@ -38,9 +37,9 @@ export default function PaymentMethodsScreen() {
   const [storedCards, setStoredCards] = useState<StoredCard[]>([]);
   const [loading, setLoading] = useState(false);
   const [processing, setProcessing] = useState(false);
+  const [webCardVisible, setWebCardVisible] = useState(false);
   const pendingNonce = useRef<string | null>(null);
   const sessionRef = useRef<any>(null);
-  const squareSheetOpen = useRef(false);
   const [toastVisible, setToastVisible] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
   const [toastType, setToastType] = useState<'success' | 'error' | 'info'>('success');
@@ -67,42 +66,6 @@ export default function PaymentMethodsScreen() {
     setDialogVisible(true);
   };
 
-  useEffect(() => {
-    const appId = process.env.EXPO_PUBLIC_SQUARE_APPLICATION_ID;
-    if (appId) {
-      try {
-        SQIPCore.setSquareApplicationId(appId);
-        if (Platform.OS === 'ios') {
-          SQIPCardEntry.setIOSCardEntryTheme({
-            backgroundColor: { r: 42, g: 34, b: 24, a: 1.0 },       // card #2A2218
-            textColor: { r: 255, g: 255, b: 255, a: 1.0 },            // warm white
-            placeholderTextColor: { r: 184, g: 168, b: 136, a: 1.0 }, // #B8A888
-            tintColor: { r: 74, g: 215, b: 194, a: 1.0 },             // teal #4AD7C2
-            messageColor: { r: 184, g: 168, b: 136, a: 1.0 },
-            errorColor: { r: 255, g: 59, b: 48, a: 1.0 },
-            saveButtonTitle: 'Continue',
-            saveButtonTextColor: { r: 74, g: 215, b: 194, a: 1.0 },   // teal
-            saveButtonFont: { size: 16 },
-            keyboardAppearance: 'Dark',
-          });
-        }
-      } catch (err) {
-        console.error('[Square] Native module not available — rebuild required:', err);
-      }
-    }
-  }, []);
-
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'active' && squareSheetOpen.current) {
-        squareSheetOpen.current = false;
-        setProcessing(false);
-        pendingNonce.current = null;
-        sessionRef.current = null;
-      }
-    });
-    return () => sub.remove();
-  }, []);
 
   // Runs after the Square sheet has closed and state has committed.
   // pendingNonce is set synchronously inside the nonce callback before
@@ -215,30 +178,7 @@ export default function PaymentMethodsScreen() {
     sessionRef.current = session;
     setProcessing(true);
 
-    // The nonce callback must be synchronous — the Square native module blocks
-    // the JS microtask queue while the sheet is in "processing" state, so async
-    // work inside the callback never resolves until after manual dismissal.
-    // Instead: store the nonce, dismiss the sheet synchronously via
-    // completeCardEntry, then flip nonceReady to trigger the useEffect which
-    // runs all the API work in a clean post-render event loop tick.
-    squareSheetOpen.current = true;
-    SQIPCardEntry.startCardEntryFlow(
-      false,
-      (cardDetails: CardDetails): NonceSuccessResult => {
-        squareSheetOpen.current = false;
-        pendingNonce.current = cardDetails.nonce ?? null;
-        return {
-          success: true,
-          onCardEntryComplete: () => {
-            setNonceReady(true);
-          },
-        };
-      },
-      () => {
-        squareSheetOpen.current = false;
-        setProcessing(false);
-      }
-    );
+    setWebCardVisible(true);
   };
 
   const handleSetDefault = async (squareCardId: string) => {
@@ -474,6 +414,24 @@ export default function PaymentMethodsScreen() {
           </ScrollView>
         </View>
 
+        <SquareWebCardEntry
+          visible={webCardVisible}
+          applicationId={process.env.EXPO_PUBLIC_SQUARE_APPLICATION_ID ?? ''}
+          locationId={process.env.EXPO_PUBLIC_SQUARE_LOCATION_ID ?? ''}
+          isSandbox={process.env.EXPO_PUBLIC_SQUARE_ENVIRONMENT !== 'production'}
+          baseUrl={SUPABASE_URL}
+          currentColors={currentColors}
+          onNonce={(nonce) => {
+            setWebCardVisible(false);
+            setProcessing(false);
+            pendingNonce.current = nonce;
+            setNonceReady(true);
+          }}
+          onCancel={() => {
+            setWebCardVisible(false);
+            setProcessing(false);
+          }}
+        />
         <Toast
           visible={toastVisible}
           message={toastMessage}

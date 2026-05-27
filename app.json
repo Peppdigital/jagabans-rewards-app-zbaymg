@@ -47,7 +47,8 @@
         {
           "merchantIdentifier": "com.ooosumfoods.jagabansla"
         }
-      ]
+      ],
+      "./plugins/withSquarePods.js"
     ],
     "scheme": "jagabansla",
     "experiments": {

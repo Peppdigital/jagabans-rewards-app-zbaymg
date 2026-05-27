@@ -10,7 +10,6 @@ import {
   ActivityIndicator,
   FlatList,
   Keyboard,
-  AppState,
   Platform,
 } from 'react-native';
 import { useRouter } from 'expo-router';
@@ -20,8 +19,8 @@ import { IconSymbol } from '@/components/IconSymbol';
 import * as Haptics from 'expo-haptics';
 import Toast from '@/components/Toast';
 import { SUPABASE_URL, supabase } from '@/app/integrations/supabase/client';
-import { SQIPCore, SQIPCardEntry, type CardDetails, type NonceSuccessResult } from '@/utils/squareInAppPayments';
 import { LinearGradient } from 'expo-linear-gradient';
+import SquareWebCardEntry from '@/components/SquareWebCardEntry';
 import * as Linking from 'expo-linking';
 import {appConfigService} from '@/services/supabaseService';
 import { useAppConfig } from '@/hooks/useAppConfig';
@@ -161,7 +160,7 @@ function CheckoutContent() {
     loadUserProfile,
   } = useApp();
 
-  const [squareInitialized, setSquareInitialized] = useState(false);
+  const [webCardVisible, setWebCardVisible] = useState(false);
 
   // ── Saved cards ───────────────────────────────────────────────────────────
   const [savedCards, setSavedCards] = useState<SavedCard[]>([]);
@@ -173,7 +172,6 @@ function CheckoutContent() {
   const pendingPaymentBody = useRef<any>(null);
   const checkoutSessionRef = useRef<any>(null);
   const [checkoutNonceReady, setCheckoutNonceReady] = useState(false);
-  const squareSheetOpen = useRef(false);
 
   // ── State ─────────────────────────────────────────────────────────────────
 
@@ -588,51 +586,6 @@ const pointsToEarn = appPointsEnabled
 
   // ── Square SDK initialization ─────────────────────────────────────────────
 
-  useEffect(() => {
-    const appId = process.env.EXPO_PUBLIC_SQUARE_APPLICATION_ID;
-    if (!appId) {
-      console.warn('[Square] EXPO_PUBLIC_SQUARE_APPLICATION_ID is not set.');
-      return;
-    }
-    try {
-      SQIPCore.setSquareApplicationId(appId);
-      if (Platform.OS === 'ios') {
-        SQIPCardEntry.setIOSCardEntryTheme({
-          backgroundColor: { r: 42, g: 34, b: 24, a: 1.0 },       // card #2A2218
-          textColor: { r: 255, g: 255, b: 255, a: 1.0 },            // warm white
-          placeholderTextColor: { r: 184, g: 168, b: 136, a: 1.0 }, // #B8A888
-          tintColor: { r: 74, g: 215, b: 194, a: 1.0 },             // teal #4AD7C2
-          messageColor: { r: 184, g: 168, b: 136, a: 1.0 },
-          errorColor: { r: 255, g: 59, b: 48, a: 1.0 },
-          saveButtonTitle: 'Continue',
-          saveButtonTextColor: { r: 74, g: 215, b: 194, a: 1.0 },   // teal
-          saveButtonFont: { size: 16 },
-          keyboardAppearance: 'Dark',
-        });
-      }
-      setSquareInitialized(true);
-    } catch (err) {
-      console.error('[Square] Native module not available — rebuild required:', err);
-    }
-  }, []);
-
-  // ── Reset processing state if Square sheet was dismissed via back button ──
-  // On Android the Square card entry runs as a separate Activity. Pressing
-  // back closes it without invoking the JS cancel callback, so AppState
-  // fires 'active' when the RN Activity resumes. We use squareSheetOpen to
-  // distinguish this case from any other foreground event.
-
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'active' && squareSheetOpen.current) {
-        squareSheetOpen.current = false;
-        setProcessing(false);
-        pendingPaymentBody.current = null;
-        checkoutSessionRef.current = null;
-      }
-    });
-    return () => sub.remove();
-  }, []);
 
   // ── Load saved payment methods ────────────────────────────────────────────
 
@@ -713,11 +666,6 @@ const pointsToEarn = appPointsEnabled
   // ── Order placement ───────────────────────────────────────────────────────
 
   const proceedWithPayment = useCallback(async () => {
-    if (!squareInitialized) {
-      showToast('error', 'Payment system not ready. Please try again.');
-      return;
-    }
-
     if (orderType === 'delivery' && deliveryQuote && isQuoteExpired()) {
       const addr = validatedAddress || deliveryAddress;
       if (addr) await fetchDeliveryQuote(addr, validatedUberAddress || undefined);
@@ -821,36 +769,14 @@ const pointsToEarn = appPointsEnabled
       return;
     }
 
-    // ── New card path: Square card entry sheet ────────────────────────────
-    // completeCardEntry is called synchronously so the sheet dismisses before
-    // the fetch runs (same pattern as payment-methods screen).
+    // ── New card path: Web Payments SDK sheet ─────────────────────────────
     pendingPaymentBody.current = paymentBody;
     checkoutSessionRef.current = session;
-
-    squareSheetOpen.current = true;
-    SQIPCardEntry.startCardEntryFlow(
-      false,
-      (cardDetails: CardDetails): NonceSuccessResult => {
-        squareSheetOpen.current = false;
-        pendingNonce.current = cardDetails.nonce ?? null;
-        return {
-          success: true,
-          onCardEntryComplete: () => {
-            setCheckoutNonceReady(true);
-          },
-        };
-      },
-      () => {
-        squareSheetOpen.current = false;
-        setProcessing(false);
-        pendingPaymentBody.current = null;
-        checkoutSessionRef.current = null;
-      }
-    );
+    setWebCardVisible(true);
   }, [
-    squareInitialized, orderType, cart, userProfile, validatedAddress, deliveryAddress,
-    validatedUberAddress, pickupNotes, subtotal, tax, total, deliveryFee,
-    deliveryQuote, isQuoteExpired, fetchDeliveryQuote,
+    orderType, cart, userProfile, validatedAddress, deliveryAddress,
+    validatedUberAddress, pickupNotes, subtotal, tax, total, discount, pointsDiscount,
+    deliveryFee, deliveryQuote, isQuoteExpired, fetchDeliveryQuote,
     deliveryEmail, phoneCountryCode, phoneNumber, showToast, clearCart, loadUserProfile, router,
     selectedCardId, savedCards,
   ]);
@@ -1718,6 +1644,25 @@ const pointsToEarn = appPointsEnabled
           type={toastType}
           onHide={() => setToastVisible(false)}
           currentColors={currentColors}
+        />
+        <SquareWebCardEntry
+          visible={webCardVisible}
+          applicationId={process.env.EXPO_PUBLIC_SQUARE_APPLICATION_ID ?? ''}
+          locationId={process.env.EXPO_PUBLIC_SQUARE_LOCATION_ID ?? ''}
+          isSandbox={process.env.EXPO_PUBLIC_SQUARE_ENVIRONMENT !== 'production'}
+          baseUrl={SUPABASE_URL}
+          currentColors={currentColors}
+          onNonce={(nonce) => {
+            setWebCardVisible(false);
+            pendingNonce.current = nonce;
+            setCheckoutNonceReady(true);
+          }}
+          onCancel={() => {
+            setWebCardVisible(false);
+            setProcessing(false);
+            pendingPaymentBody.current = null;
+            checkoutSessionRef.current = null;
+          }}
         />
       </SafeAreaView>
     </LinearGradient>
