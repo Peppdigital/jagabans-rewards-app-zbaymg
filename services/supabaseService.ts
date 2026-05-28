@@ -1908,6 +1908,7 @@ export interface AppConfig {
   points_enabled: boolean;
   points_value_rate: number;
   points_reward_percentage: number; // % of subtotal earned as points, e.g. 5 = 5%
+  maintenance_target_date: string | null;
 }
 
 export const appConfigService = {
@@ -1925,6 +1926,7 @@ export const appConfigService = {
           'points_enabled',
           'points_value_rate',
           'points_reward_percentage',
+          'maintenance_target_date',
         ]);
       if (error) throw error;
 
@@ -1948,6 +1950,11 @@ export const appConfigService = {
         try { return JSON.parse(row.value) as T; } catch { return fallback; }
       };
 
+      const getStr = (key: string): string | null => {
+        const row = rows.find((r) => r.key === key);
+        return row?.value ?? null;
+      };
+
       return {
         data: {
           hours_restriction_enabled: getBool('hours_restriction_enabled', true),
@@ -1958,6 +1965,7 @@ export const appConfigService = {
           points_enabled:            getBool('points_enabled', true),
           points_value_rate:         getNum('points_value_rate', 0.01),
           points_reward_percentage:  getNum('points_reward_percentage', 5),
+          maintenance_target_date:   getStr('maintenance_target_date'),
         },
         error: null,
       };

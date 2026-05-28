@@ -310,6 +310,28 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     };
   }, []);
 
+  // Auto-reopen store when maintenance_target_date is reached
+  useEffect(() => {
+    if (!appConfig.store_manually_closed || !appConfig.maintenance_target_date) return;
+
+    const targetDate = new Date(appConfig.maintenance_target_date);
+    if (isNaN(targetDate.getTime())) return;
+
+    const msUntilOpen = targetDate.getTime() - Date.now();
+
+    const reopen = () => {
+      appConfigService.updateAppConfig({ store_manually_closed: false });
+    };
+
+    if (msUntilOpen <= 0) {
+      reopen();
+      return;
+    }
+
+    const timer = setTimeout(reopen, msUntilOpen);
+    return () => clearTimeout(timer);
+  }, [appConfig.store_manually_closed, appConfig.maintenance_target_date]);
+
   // Compute ordering status from app config + time-based logic
   const orderingStatus: OrderingStatus = (() => {
     if (appConfig.store_manually_closed) {
