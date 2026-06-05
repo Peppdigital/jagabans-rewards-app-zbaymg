@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   View,
   Text,
@@ -144,6 +145,47 @@ const GOOGLE_PLACES_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_PLACES_API_KEY || '
 // const POINTS_REWARD_PERCENTAGE = 0.05;
 const QUOTE_REFRESH_BUFFER_MS = 60_000;
 const FALLBACK_DELIVERY_FEE = 19.99; // applied when Uber quote is unavailable
+const ORDER_CONFIRMATION_CACHE_KEY = 'last_order_confirmation';
+
+function mapSquareStatusToOrderStatus(status: string | undefined) {
+  switch (status) {
+    case 'COMPLETED':
+      return 'succeeded';
+    case 'APPROVED':
+      return 'processing';
+    case 'CANCELED':
+      return 'canceled';
+    case 'FAILED':
+      return 'failed';
+    default:
+      return 'succeeded';
+  }
+}
+
+async function cacheOrderConfirmation(orderId: string, paymentBody: any, paymentData: any) {
+  const cachedOrder = {
+    id: orderId,
+    subtotal: (paymentBody.subtotal ?? 0) / 100,
+    discount: (paymentBody.discountAmount ?? 0) / 100,
+    tax: (paymentBody.taxAmount ?? 0) / 100,
+    delivery_fee: (paymentBody.deliveryFeeCents ?? 0) / 100,
+    total: (paymentBody.amount ?? 0) / 100,
+    points_earned: paymentData.pointsEarned ?? 0,
+    status: 'pending',
+    payment_status: mapSquareStatusToOrderStatus(paymentData.orderStatus),
+    delivery_address: paymentBody.orderType === 'delivery' ? paymentBody.deliveryAddress ?? null : null,
+    pickup_notes: paymentBody.orderType === 'pickup' ? paymentBody.pickupNotes ?? null : null,
+    created_at: new Date().toISOString(),
+    order_items: (paymentBody.items ?? []).map((item: any) => ({
+      id: String(item.id),
+      name: item.name,
+      price: item.price,
+      quantity: item.quantity,
+    })),
+  };
+
+  await AsyncStorage.setItem(ORDER_CONFIRMATION_CACHE_KEY, JSON.stringify(cachedOrder));
+}
 
 // ============================================================================
 // CHECKOUT CONTENT
@@ -651,11 +693,14 @@ const pointsToEarn = appPointsEnabled
         const data = await response.json();
         if (!data.success) { showToast('error', data.error || 'Payment failed'); setProcessing(false); return; }
 
+        await cacheOrderConfirmation(data.orderId, body, data).catch((cacheError) => {
+          console.warn('Failed to cache order confirmation:', cacheError);
+        });
         showToast('success', 'Payment successful!');
         clearCart();
         loadUserProfile();
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        setTimeout(() => { setProcessing(false); router.push({ pathname: '/order-confirmation', params: { orderId: data.orderId } }); }, 100);
+        setTimeout(() => { router.replace({ pathname: '/order-confirmation', params: { orderId: data.orderId } }); setProcessing(false); }, 100);
       } catch (err: any) {
         showToast('error', err.message || 'Payment failed');
         setProcessing(false);
@@ -757,11 +802,14 @@ const pointsToEarn = appPointsEnabled
         const data = await response.json();
         if (!data.success) { showToast('error', data.error || 'Payment failed'); setProcessing(false); return; }
 
+        await cacheOrderConfirmation(data.orderId, paymentBody, data).catch((cacheError) => {
+          console.warn('Failed to cache order confirmation:', cacheError);
+        });
         showToast('success', 'Payment successful!');
         clearCart();
         loadUserProfile();
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        setTimeout(() => { setProcessing(false); router.push({ pathname: '/order-confirmation', params: { orderId: data.orderId } }); }, 100);
+        setTimeout(() => { router.replace({ pathname: '/order-confirmation', params: { orderId: data.orderId } }); setProcessing(false); }, 100);
       } catch (err: any) {
         showToast('error', err.message || 'Payment failed');
         setProcessing(false);

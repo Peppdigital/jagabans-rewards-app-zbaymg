@@ -11,11 +11,15 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams, Stack } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useApp } from '@/contexts/AppContext';
 import { IconSymbol } from '@/components/IconSymbol';
 import * as Haptics from 'expo-haptics';
 import { supabase } from '@/app/integrations/supabase/client';
 import { LinearGradient } from 'expo-linear-gradient';
+
+const ORDER_CONFIRMATION_CACHE_KEY = 'last_order_confirmation';
+const ORDER_FETCH_TIMEOUT_MS = 8000;
 
 interface OrderItem {
   id: string;
@@ -38,6 +42,15 @@ interface OrderDetails {
   pickup_notes: string | null;
   created_at: string;
   order_items: OrderItem[];
+}
+
+function withTimeout<T>(promise: PromiseLike<T>, timeoutMs: number): Promise<T> {
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise<T>((_, reject) => {
+      setTimeout(() => reject(new Error('Order details request timed out')), timeoutMs);
+    }),
+  ]);
 }
 
 export default function OrderConfirmationScreen() {
@@ -64,11 +77,30 @@ export default function OrderConfirmationScreen() {
       setLoading(false);
       return;
     }
+
+    let hasCachedOrder = false;
     try {
-      setLoading(true);
+      const cached = await AsyncStorage.getItem(ORDER_CONFIRMATION_CACHE_KEY);
+      if (cached) {
+        const cachedOrder = JSON.parse(cached) as OrderDetails;
+        if (cachedOrder.id === orderId) {
+          hasCachedOrder = true;
+          setOrder(cachedOrder);
+          setError(null);
+          setLoading(false);
+        }
+      }
+    } catch (cacheError) {
+      console.warn('Failed to load cached order confirmation:', cacheError);
+    }
+
+    try {
+      if (!hasCachedOrder) {
+        setLoading(true);
+      }
       setError(null);
 
-      const { data, error: fetchError } = await supabase
+      const orderQuery = supabase
         .from('orders')
         .select(`
           id,
@@ -91,7 +123,9 @@ export default function OrderConfirmationScreen() {
           )
         `)
         .eq('id', orderId)
-        .single();
+        .single() as unknown as PromiseLike<{ data: OrderDetails | null; error: any }>;
+
+      const { data, error: fetchError } = await withTimeout(orderQuery, ORDER_FETCH_TIMEOUT_MS);
 
       if (fetchError) {
         console.error('Error fetching order:', fetchError);
@@ -103,11 +137,16 @@ export default function OrderConfirmationScreen() {
       }
 
       setOrder(data as OrderDetails);
+      await AsyncStorage.setItem(ORDER_CONFIRMATION_CACHE_KEY, JSON.stringify(data));
     } catch (err) {
       console.error('Error in fetchOrderDetails:', err);
-      setError(err instanceof Error ? err.message : 'Failed to load order');
+      if (!hasCachedOrder) {
+        setError(err instanceof Error ? err.message : 'Failed to load order');
+      }
     } finally {
-      setLoading(false);
+      if (!hasCachedOrder) {
+        setLoading(false);
+      }
     }
   }, [orderId]);
 
