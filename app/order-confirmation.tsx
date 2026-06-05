@@ -1,5 +1,5 @@
 
-import React, { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -42,8 +42,12 @@ interface OrderDetails {
 
 export default function OrderConfirmationScreen() {
   const router = useRouter();
-  const { orderId } = useLocalSearchParams<{ orderId: string }>();
-  const { currentColors, setTabBarVisible, loadUserProfile } = useApp();
+  const params = useLocalSearchParams<{ orderId?: string | string[] }>();
+  const orderId = useMemo(
+    () => (Array.isArray(params.orderId) ? params.orderId[0] : params.orderId),
+    [params.orderId]
+  );
+  const { currentColors, setTabBarVisible } = useApp();
 
   const [order, setOrder] = useState<OrderDetails | null>(null);
   const [loading, setLoading] = useState(true);
@@ -54,17 +58,12 @@ export default function OrderConfirmationScreen() {
     return () => setTabBarVisible(true);
   }, [setTabBarVisible]);
 
-  useEffect(() => {
+  const fetchOrderDetails = useCallback(async () => {
     if (!orderId) {
       setError('No order ID provided');
       setLoading(false);
       return;
     }
-
-    fetchOrderDetails();
-  }, [orderId]);
-
-  const fetchOrderDetails = async () => {
     try {
       setLoading(true);
       setError(null);
@@ -104,16 +103,17 @@ export default function OrderConfirmationScreen() {
       }
 
       setOrder(data as OrderDetails);
-      
-      // Reload user profile to update points
-      await loadUserProfile();
     } catch (err) {
       console.error('Error in fetchOrderDetails:', err);
       setError(err instanceof Error ? err.message : 'Failed to load order');
     } finally {
       setLoading(false);
     }
-  };
+  }, [orderId]);
+
+  useEffect(() => {
+    fetchOrderDetails();
+  }, [fetchOrderDetails]);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -448,14 +448,13 @@ export default function OrderConfirmationScreen() {
     },
     orderIdValue: {
       fontSize: 16,
-      fontFamily: 'Inter_700Bold',
       color: currentColors.text,
       textAlign: 'center',
       fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
     },
     buttonContainer: {
       gap: 12,
-      marginTop: 20,
+      marginTop: 20,  
     },
     primaryButton: {
       borderRadius: 0,

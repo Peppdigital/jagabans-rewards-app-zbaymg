@@ -121,6 +121,7 @@ function deriveCustomerName(body: PaymentRequest, payment: unknown): string | nu
 // Email helper
 // ─────────────────────────────────────────────────────────────
 
+
 async function sendEmail(to: string, subject: string, html: string, text: string) {
   const resendApiKey = Deno.env.get("RESEND_API_KEY");
   const restaurantEmail = Deno.env.get("RESTAURANT_EMAIL") || "noreply@jagabans.com";
@@ -720,6 +721,7 @@ Deno.serve(async (req: Request) => {
         customer_name:     customerName ?? null,
         payment_status:    ordersPaymentStatus,
         delivery_provider: orderType === "delivery" ? "uber" : null,
+        delivery_fee:      deliveryFeeDollars,
       })
       .select("id, order_number")
       .single();

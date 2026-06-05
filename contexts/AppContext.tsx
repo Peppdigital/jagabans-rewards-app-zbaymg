@@ -556,10 +556,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
 
   const currentColors = getCurrentColors();
 
-  const setTabBarVisible = (visible: boolean) => {
+  const setTabBarVisible = useCallback((visible: boolean) => {
     console.log('Setting tab bar visibility:', visible);
     setIsTabBarVisible(visible);
-  };
+  }, []);
 
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
     console.log('Showing toast:', message, type);

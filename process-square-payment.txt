@@ -1,466 +1,877 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.3';
+import { createClient } from "npm:@supabase/supabase-js@2.46.1";
 
 const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-// ── Uber Direct helpers (mirrors stripe-webhook) ──────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────
 
-interface UberAddress {
-  street_address: [string, string];
-  city: string;
-  state: string;
-  zip_code: string;
-  country: string;
-}
-
-interface UberDelivery {
-  id: string;
-  status: string;
-  tracking_url?: string;
-  dropoff_eta?: string;
-}
-
-function parseUberAddress(value: string): UberAddress | null {
-  try {
-    const parsed = JSON.parse(value);
-    if (
-      parsed &&
-      Array.isArray(parsed.street_address) &&
-      parsed.street_address.length === 2 &&
-      typeof parsed.city === 'string' &&
-      typeof parsed.state === 'string' &&
-      typeof parsed.zip_code === 'string' &&
-      typeof parsed.country === 'string'
-    ) {
-      return parsed as UberAddress;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function resolveDropoffAddress(raw: string): string {
-  if (parseUberAddress(raw)) return raw;
-  const fallback: UberAddress = {
-    street_address: [raw.trim(), ''],
-    city: '', state: '', zip_code: '', country: 'US',
+interface PaymentRequest {
+  sourceId: string;
+  amount: number;         // cents — grand total (post-discount, post-tax, post-delivery)
+  subtotal: number;       // cents — item subtotal only (pre-discount)
+  taxAmount: number;      // cents — tax on discounted subtotal
+  currency?: string;
+  customer: {
+    name: string;
+    email: string;
+    phone?: string;
+    address?: string;
+    city?: string;
+    state?: string;
+    zip?: string;
+    deliveryType?: "delivery" | "pickup";
+    pickupDate?: string;
+    pickupTime?: string;
+    deliveryInstructions?: string;
   };
-  return JSON.stringify(fallback);
+  items: Array<{
+    id: string;
+    name: string;
+    quantity: number;
+    price: number; // dollars
+  }>;
+  orderType?: "delivery" | "pickup";
+  deliveryAddress?: string;
+  pickupNotes?: string;
+  deliveryQuoteId?: string | null;
+  deliveryFee?: number;      // dollars
+  deliveryFeeCents?: number; // cents
+  discountAmount?: number;   // cents — server verifies against app_settings
+  customerId?: string;       // Square customer ID — required when sourceId is a stored card
 }
 
-function resolvePickupAddress(): string {
-  const structured = Deno.env.get('RESTAURANT_ADDRESS_UBER');
-  if (structured && parseUberAddress(structured)) return structured;
-  const plain = Deno.env.get('RESTAURANT_ADDRESS');
-  if (plain) {
-    const fallback: UberAddress = {
-      street_address: [plain.trim(), ''],
-      city: '', state: '', zip_code: '', country: 'US',
-    };
-    return JSON.stringify(fallback);
-  }
-  throw new Error('Neither RESTAURANT_ADDRESS_UBER nor RESTAURANT_ADDRESS is configured');
+interface OrderEmailData {
+  customerName: string;
+  customerEmail: string;
+  customerPhone: string;
+  orderNumber: string;
+  orderId: string;
+  orderType: "delivery" | "pickup";
+  subtotal: number;
+  discountAmount: number;
+  taxAmount: number;
+  deliveryFee: number;
+  total: number;
+  items: Array<{ name: string; quantity: number; price: number }>;
+  pickupNotes?: string;
+  deliveryAddress?: string;
+  deliveryInstructions?: string;
+  pointsEarned?: number;
 }
 
-async function getUberAccessToken(clientId: string, clientSecret: string): Promise<string> {
-  const res = await fetch('https://auth.uber.com/oauth/v2/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_type: 'client_credentials',
-      scope: 'eats.deliveries direct.organizations',
-    }),
+// ─────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────
+
+function json(payload: unknown, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
-  if (!res.ok) throw new Error(`Uber token error: ${res.status} ${await res.text()}`);
-  const data = await res.json();
-  return data.access_token as string;
 }
 
-async function createUberDelivery(accessToken: string, payload: Record<string, unknown>): Promise<UberDelivery> {
-  const customerId = Deno.env.get('UBER_CUSTOMER_ID');
-  const res = await fetch(`https://api.uber.com/v1/customers/${customerId}/deliveries`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) throw new Error(`Uber createDelivery failed (${res.status}): ${await res.text()}`);
-  return res.json() as Promise<UberDelivery>;
+function looksLikeAnonKey(header: string | null) {
+  if (!header) return false;
+  const m = header.match(/^Bearer\s+(.+)$/i);
+  if (!m) return false;
+  const token = m[1];
+  const envAnon = Deno.env.get("SUPABASE_ANON_KEY");
+  if (envAnon && token === envAnon) return true;
+  if (/anon/i.test(token)) return true;
+  return false;
 }
 
-// ── Main handler ──────────────────────────────────────────────────────────────
+function deriveCustomerName(body: PaymentRequest, payment: unknown): string | null {
+  const normalize = (s: unknown) =>
+    typeof s === "string" ? s.replace(/\s+/g, " ").trim().slice(0, 200) : "";
+  const hasDigits = (s: string) => /\d/.test(s);
 
-Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
-  if (req.method !== 'POST') {
-    return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405, headers: corsHeaders });
+  const fromBody = normalize(body?.customer?.name);
+  if (fromBody && !hasDigits(fromBody)) return fromBody;
+
+  const p = payment as Record<string, unknown> | null;
+  const candidates = [
+    p?.buyer_name ?? p?.buyerName,
+    (() => {
+      const ba = (p?.billing_address ?? p?.billingAddress) as Record<string, unknown> | undefined;
+      return [ba?.first_name ?? ba?.firstName, ba?.last_name ?? ba?.lastName]
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+    })(),
+    ((p?.card_details ?? p?.cardDetails) as Record<string, unknown> | undefined)
+      ?.card
+      ? (((p?.card_details ?? p?.cardDetails) as Record<string, unknown>)
+          .card as Record<string, unknown>)?.cardholder_name
+      : undefined,
+  ];
+  for (const c of candidates) {
+    const n = normalize(c);
+    if (n && !hasDigits(n)) return n;
   }
+  return null;
+}
 
-  const startTime = Date.now();
+// ─────────────────────────────────────────────────────────────
+// Email helper
+// ─────────────────────────────────────────────────────────────
+
+async function sendEmail(to: string, subject: string, html: string, text: string) {
+  const resendApiKey = Deno.env.get("RESEND_API_KEY");
+  const restaurantEmail = Deno.env.get("RESTAURANT_EMAIL") || "noreply@jagabans.com";
+
+  if (!resendApiKey) {
+    console.log("📧 [DEV] Email skipped (no RESEND_API_KEY):", { to, subject });
+    return { success: true, id: "dev-" + Date.now() };
+  }
 
   try {
-    const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? '';
-    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
-    const SQUARE_ACCESS_TOKEN = Deno.env.get('SQUARE_ACCESS_TOKEN') ?? '';
-    const SQUARE_LOCATION_ID = Deno.env.get('SQUARE_LOCATION_ID') ?? '';
-    const SQUARE_ENV = Deno.env.get('SQUARE_ENV') || 'production';
-
-    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SQUARE_ACCESS_TOKEN || !SQUARE_LOCATION_ID) {
-      console.error('Missing env vars:', { SUPABASE_URL: !!SUPABASE_URL, SQUARE_ACCESS_TOKEN: !!SQUARE_ACCESS_TOKEN, SQUARE_LOCATION_ID: !!SQUARE_LOCATION_ID });
-      return new Response(JSON.stringify({ error: 'Server misconfigured' }), { status: 500, headers: corsHeaders });
-    }
-
-    // ── Auth ──────────────────────────────────────────────────────────────────
-    const authHeader = req.headers.get('Authorization') ?? '';
-    if (!authHeader.startsWith('Bearer ')) {
-      return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: corsHeaders });
-    }
-    const token = authHeader.slice(7);
-
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-    const { data: { user }, error: userErr } = await supabase.auth.getUser(token);
-    if (userErr || !user) {
-      return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: corsHeaders });
-    }
-
-    // ── Parse body ────────────────────────────────────────────────────────────
-    const body = await req.json();
-    const { sourceId, amount, currency, customer, orderPayload } = body;
-
-    if (!sourceId || !amount || !orderPayload) {
-      return new Response(JSON.stringify({ error: 'Missing required fields: sourceId, amount, orderPayload' }), { status: 400, headers: corsHeaders });
-    }
-
-    const {
-      order_type,
-      delivery_address,
-      delivery_address_uber,
-      pickup_notes,
-      items,
-      subtotal,
-      tax,
-      total,
-      points_earned = 0,
-      points_used = 0,
-      customer_name,
-      customer_email,
-      customer_phone,
-      uber_quote_id,
-    } = orderPayload;
-
-    // ── 1. Charge via Square Payments API ─────────────────────────────────────
-    const squareBaseUrl = SQUARE_ENV === 'sandbox'
-      ? 'https://connect.squareupsandbox.com'
-      : 'https://connect.squareup.com';
-
-    const squareRes = await fetch(`${squareBaseUrl}/v2/payments`, {
-      method: 'POST',
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
       headers: {
-        Authorization: `Bearer ${SQUARE_ACCESS_TOKEN}`,
-        'Content-Type': 'application/json',
-        'Square-Version': '2024-01-18',
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${resendApiKey}`,
       },
-      body: JSON.stringify({
-        source_id: sourceId,
-        idempotency_key: crypto.randomUUID(),
-        amount_money: {
-          amount: Number(amount),
-          currency: (currency || 'USD').toUpperCase(),
-        },
-        location_id: SQUARE_LOCATION_ID,
-        buyer_email_address: customer?.email || customer_email || undefined,
-      }),
+      body: JSON.stringify({ from: restaurantEmail, to, subject, html, text }),
     });
-
-    if (!squareRes.ok) {
-      const errBody = await squareRes.json().catch(() => ({}));
-      const errMsg = (errBody as any).errors?.[0]?.detail || `Square payment failed (${squareRes.status})`;
-      console.error('[Square] Payment error:', errMsg);
-      throw new Error(errMsg);
+    if (!res.ok) {
+      const err = await res.json();
+      console.error("❌ Resend error:", err);
+      return { success: false, error: err };
     }
+    const data = await res.json();
+    console.log("✅ Email sent:", data.id);
+    return { success: true, id: data.id };
+  } catch (err) {
+    console.error("❌ Email send threw:", err);
+    return { success: false, error: err };
+  }
+}
 
-    const squareData = await squareRes.json();
-    const paymentId: string = (squareData as any).payment.id;
-    console.log('Square payment created:', paymentId);
+// ─────────────────────────────────────────────────────────────
+// Uber Direct dispatch — delegates to trigger-uber-delivery
+// ─────────────────────────────────────────────────────────────
 
-    // ── 2. Create order ───────────────────────────────────────────────────────
-    const { data: orderRow, error: orderErr } = await supabase
-      .from('orders')
-      .insert({
-        user_id: user.id,
-        status: 'preparing',
-        payment_status: 'succeeded',
-        payment_id: paymentId,
-        subtotal: Number(subtotal ?? 0),
-        tax: Number(tax ?? 0),
-        total: Number(total ?? 0),
-        delivery_address: order_type === 'delivery' ? (delivery_address || null) : null,
-        pickup_notes: pickup_notes || null,
-        points_earned: Number(points_earned ?? 0),
-        cancellation_deadline: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-      })
-      .select('id')
-      .single();
+interface UberDispatchResult {
+  deliveryId: string;
+  trackingUrl: string | null;
+  status: string;
+}
 
-    if (orderErr || !orderRow) {
-      throw new Error(`Failed to create order: ${orderErr?.message}`);
-    }
-    const orderId: string = orderRow.id;
-    console.log('Order created:', orderId);
+async function dispatchUberDelivery(
+  orderId: string,
+  orderItems: PaymentRequest["items"],
+  customer: PaymentRequest["customer"],
+  quoteId?: string | null
+): Promise<UberDispatchResult> {
+  const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
 
-    // ── 3. Insert order items ─────────────────────────────────────────────────
-    if (Array.isArray(items) && items.length > 0) {
-      const itemRows = items.map((item: any) => ({
-        order_id: orderId,
-        menu_item_id: item.id ? Number(item.id) : null,
-        name: item.name,
-        price: Number(item.price ?? 0),
-        quantity: Number(item.quantity ?? 1),
-      }));
-      const { error: itemsErr } = await supabase.from('order_items').insert(itemRows);
-      if (itemsErr) console.error('order_items insert error:', itemsErr.message);
-    }
+  const deliveryAddressString = [
+    customer.address,
+    customer.city,
+    customer.state,
+    customer.zip,
+  ]
+    .filter(Boolean)
+    .join(", ");
 
-    // ── 4. Handle points ──────────────────────────────────────────────────────
-    if (Number(points_used) > 0 || Number(points_earned) > 0) {
-      const { data: profile } = await supabase
-        .from('user_profiles')
-        .select('points')
-        .eq('user_id', user.id)
-        .single<{ points: number }>();
+  const uberAddress = {
+    street_address: [customer.address ?? "", ""],
+    city:     customer.city    ?? "",
+    state:    customer.state   ?? "",
+    zip_code: customer.zip     ?? "",
+    country:  "US",
+  };
 
-      const current = Number(profile?.points ?? 0);
-      const updated = Math.max(0, current - Number(points_used)) + Number(points_earned);
+  const body: Record<string, unknown> = {
+    order_id:              orderId,
+    customer_name:         customer.name,
+    customer_phone:        customer.phone ?? "",
+    delivery_address:      deliveryAddressString,
+    delivery_address_uber: JSON.stringify(uberAddress),
+    pickup_notes:          customer.deliveryInstructions ?? "",
+    items: orderItems.map((i) => ({ name: i.name, quantity: i.quantity })),
+  };
+  if (quoteId) body.uber_quote_id = quoteId;
 
-      await supabase
-        .from('user_profiles')
-        .update({ points: updated })
-        .eq('user_id', user.id);
+  const res = await fetch(`${supabaseUrl}/functions/v1/trigger-uber-delivery`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""}`,
+    },
+    body: JSON.stringify(body),
+  });
 
-      console.log(`Points: ${current} → ${updated} (used ${points_used}, earned ${points_earned})`);
-    }
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error ?? "Uber Direct dispatch failed");
 
-    // ── 5. Record order event ─────────────────────────────────────────────────
-    await supabase.from('order_events').insert({
-      order_id: orderId,
-      type: 'order_created',
-      payload: {
-        user_id: user.id,
-        order_type,
-        total: Number(total ?? 0),
-        square_payment_id: paymentId,
-      },
-    }).then(({ error }) => {
-      if (error) console.warn('order_events insert error (non-fatal):', error.message);
-    });
+  return {
+    deliveryId:  data.delivery_id,
+    trackingUrl: data.tracking_url ?? null,
+    status:      data.status ?? "unknown",
+  };
+}
 
-    // ── 6. Background: notifications ──────────────────────────────────────────
-    const FUNCTIONS_URL = Deno.env.get('FUNCTIONS_URL') || `${SUPABASE_URL}/functions/v1`;
-    const notificationHeaders = {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-      'x-provider': 'square-payment',
-      'x-provider-event-id': paymentId,
-    };
+// ─────────────────────────────────────────────────────────────
+// Email templates
+// ─────────────────────────────────────────────────────────────
 
-    const orderNotificationPayload = {
-      orderId,
-      user_id: user.id,
-      customerName: customer_name || '',
-      customerEmail: customer_email || '',
-      customerPhone: customer_phone || '',
-      items: items ?? [],
-      subtotal: Number(subtotal ?? 0),
-      tax: Number(tax ?? 0),
-      total: Number(total ?? 0),
-      deliveryAddress: order_type === 'delivery' ? delivery_address : null,
-      pickupNotes: pickup_notes || null,
-      orderType: order_type,
-      timestamp: new Date().toISOString(),
-    };
+function buildCustomerEmailHtml(d: OrderEmailData): string {
+  const itemRows = d.items
+    .map(
+      (i) =>
+        `<tr>
+          <td style="padding:8px;text-align:left;">${i.name}</td>
+          <td style="padding:8px;text-align:center;">×${i.quantity}</td>
+          <td style="padding:8px;text-align:right;">$${i.price.toFixed(2)}</td>
+        </tr>`
+    )
+    .join("");
 
-    EdgeRuntime.waitUntil(
-      fetch(`${FUNCTIONS_URL}/send-order-confirmation-email`, {
-        method: 'POST',
-        headers: notificationHeaders,
-        body: JSON.stringify(orderNotificationPayload),
-      })
-        .then((r) => console.log('Admin email status:', r.status))
-        .catch((e) => console.error('Admin email error:', e))
-    );
+  const discountRow =
+    d.discountAmount > 0
+      ? `<div class="total-row" style="color:#10b981"><span>Discount</span><span>−$${d.discountAmount.toFixed(2)}</span></div>`
+      : "";
 
-    EdgeRuntime.waitUntil(
-      fetch(`${FUNCTIONS_URL}/send-order-confirmation-sms`, {
-        method: 'POST',
-        headers: notificationHeaders,
-        body: JSON.stringify(orderNotificationPayload),
-      })
-        .then((r) => console.log('Admin SMS status:', r.status))
-        .catch((e) => console.error('Admin SMS error:', e))
-    );
+  const deliveryRow =
+    d.orderType === "delivery" && d.deliveryFee > 0
+      ? `<div class="total-row"><span>Delivery Fee</span><span>$${d.deliveryFee.toFixed(2)}</span></div>`
+      : "";
 
-    // ── 7. Background: customer confirmation email ────────────────────────────
-    const resendApiKey = Deno.env.get('RESEND_API_KEY');
-    if (resendApiKey && customer_email) {
-      const orderNumber = String(orderId).substring(0, 8).toUpperCase();
-      const orderDate = new Date().toLocaleDateString('en-US', {
-        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-      });
-
-      const itemsHtml = (items ?? [])
-        .map((item: any) => `
-          <tr>
-            <td style="padding:12px 0;border-bottom:1px solid #f0f0f0;">
-              <div style="font-weight:500;color:#1a1a1a;">${item.name}</div>
-              <div style="font-size:14px;color:#666;">Qty: ${item.quantity}</div>
-            </td>
-            <td style="padding:12px 0;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:500;">
-              $${(Number(item.price || 0) * Number(item.quantity || 0)).toFixed(2)}
-            </td>
-          </tr>`)
-        .join('');
-
-      const emailHtml = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Order Confirmation</title></head>
-<body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f8f9fa;">
-<table width="100%" cellpadding="0" cellspacing="0" style="padding:40px 20px;background:#f8f9fa;">
-<tr><td align="center">
-<table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 6px rgba(0,0,0,0.07);">
-  <tr><td style="background:linear-gradient(135deg,#4AD7C2 0%,#D4AF37 100%);padding:40px;text-align:center;">
-    <h1 style="margin:0;color:#fff;font-size:28px;">Order Confirmed</h1>
-    <p style="margin:8px 0 0;color:rgba(255,255,255,0.95);">Thank you for your order!</p>
-  </td></tr>
-  <tr><td style="padding:32px 40px 24px;">
-    <p style="margin:0;font-size:16px;color:#1a1a1a;">Dear ${customer_name || 'Valued Customer'},</p>
-    <p style="margin:16px 0 0;font-size:15px;color:#4a5568;line-height:1.6;">
-      We've received your order and our kitchen is preparing your meal.
-      ${order_type === 'delivery'
-        ? 'Your order will be delivered to your specified address.'
-        : 'Your order will be ready for pickup in about 20 minutes.'}
-    </p>
-  </td></tr>
-  <tr><td style="padding:0 40px 24px;">
-    <div style="background:#f8f9fa;border-radius:8px;padding:20px;border-left:4px solid #4AD7C2;">
-      <div style="font-size:12px;text-transform:uppercase;letter-spacing:1px;color:#666;font-weight:600;">Order #${orderNumber} &nbsp;·&nbsp; ${orderDate}</div>
-      ${order_type === 'delivery' && delivery_address
-        ? `<div style="margin-top:12px;font-size:15px;color:#1a1a1a;">📍 ${delivery_address}</div>`
-        : ''}
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <style>
+    body{background:#f8f9fa;font-family:Arial,sans-serif;margin:0;padding:0}
+    .container{max-width:600px;margin:40px auto;background:#fff;border-radius:8px;box-shadow:0 4px 6px rgba(0,0,0,.1);overflow:hidden}
+    .header{background:linear-gradient(135deg,#1a1a1a,#2d2d2d);color:#fff;padding:40px;text-align:center;border-bottom:3px solid #f59e0b}
+    .logo{font-size:28px;font-weight:300;letter-spacing:4px;margin-bottom:8px}
+    .content{padding:30px}
+    .success{background:#f0fdf4;border-left:4px solid #22c55e;padding:20px;margin:20px 0;border-radius:4px}
+    .success-title{color:#16a34a;font-weight:600;margin-bottom:4px}
+    .card{background:#f8fafc;border:1px solid #e2e8f0;padding:20px;margin:20px 0;border-radius:6px}
+    .card-title{font-size:12px;font-weight:600;text-transform:uppercase;color:#64748b;margin-bottom:15px;letter-spacing:1px}
+    .badge{display:inline-block;background:#dbeafe;color:#0369a1;padding:4px 12px;border-radius:20px;font-size:12px;margin-bottom:12px}
+    .detail-row{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #e2e8f0}
+    .detail-row:last-child{border-bottom:none}
+    .label{color:#64748b;font-weight:500}
+    .value{color:#1e293b;font-weight:600}
+    .items-table{width:100%;margin:15px 0;border-collapse:collapse}
+    .items-table th{background:#f1f5f9;padding:10px;text-align:left;font-size:12px;font-weight:600;border-bottom:2px solid #e2e8f0}
+    .items-table td{padding:10px;border-bottom:1px solid #e2e8f0}
+    .total-row{display:flex;justify-content:space-between;padding:6px 0;color:#475569}
+    .grand-total{display:flex;justify-content:space-between;padding:12px 0;font-size:18px;font-weight:700;color:#f59e0b;border-top:1px solid #e2e8f0;margin-top:8px}
+    .points{background:#fffbeb;border-left:4px solid #eab308;padding:15px;margin:15px 0;border-radius:4px;font-size:14px;color:#78350f}
+    .btn{display:inline-block;background:#f59e0b;color:#fff;padding:12px 32px;text-decoration:none;border-radius:4px;font-weight:600}
+    .footer{background:#1a1a1a;color:#9ca3af;padding:30px;text-align:center;font-size:12px}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="logo">JAGABANS</div>
+      <div style="font-size:13px;letter-spacing:2px">L.A. RESTAURANT</div>
     </div>
-  </td></tr>
-  <tr><td style="padding:0 40px 24px;">
-    <h2 style="margin:0 0 16px;font-size:18px;color:#1a1a1a;">Order Items</h2>
-    <table width="100%" cellpadding="0" cellspacing="0" style="border-top:2px solid #e2e8f0;">${itemsHtml}</table>
-  </td></tr>
-  <tr><td style="padding:0 40px 32px;">
-    <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8f9fa;border-radius:8px;padding:20px;">
-      <tr><td style="padding:8px 0;color:#4a5568;">Subtotal</td><td style="text-align:right;font-weight:500;">$${Number(subtotal ?? 0).toFixed(2)}</td></tr>
-      <tr><td style="padding:8px 0;color:#4a5568;">Tax</td><td style="text-align:right;font-weight:500;">$${Number(tax ?? 0).toFixed(2)}</td></tr>
-      <tr><td style="padding:16px 0 0;font-size:18px;font-weight:700;border-top:2px solid #d4af37;">Total</td>
-          <td style="padding:16px 0 0;text-align:right;font-size:20px;color:#4AD7C2;font-weight:700;border-top:2px solid #d4af37;">$${Number(total ?? 0).toFixed(2)}</td></tr>
-    </table>
-  </td></tr>
-  <tr><td style="background:#1a1a1a;padding:32px 40px;text-align:center;">
-    <h3 style="margin:0 0 12px;color:#D4AF37;font-size:22px;">Jagabans L.A.</h3>
-    <p style="margin:0;font-size:14px;color:rgba(255,255,255,0.7);">Questions? <a href="mailto:orders@jagabansla.com" style="color:#4AD7C2;">orders@jagabansla.com</a></p>
-  </td></tr>
-</table></td></tr></table>
-</body></html>`;
+    <div class="content">
+      <p style="color:#4a5568;margin-bottom:20px">Thank you for your order, <strong>${d.customerName}</strong>!</p>
+      <div class="success">
+        <div class="success-title">✓ Order Confirmed</div>
+        <p style="margin:8px 0 0;font-size:13px;color:#16a34a">Order #${d.orderNumber}</p>
+      </div>
+      <div class="card">
+        <div class="card-title">Order Details</div>
+        <span class="badge">${d.orderType === "pickup" ? "🏪 Pickup" : "🚗 Delivery"}</span>
+        <div class="detail-row"><span class="label">Order ID</span><span class="value">${d.orderId.substring(0, 8).toUpperCase()}</span></div>
+        ${d.orderType === "pickup" && d.pickupNotes ? `<div class="detail-row"><span class="label">Pickup Time</span><span class="value">${d.pickupNotes}</span></div>` : ""}
+        ${d.orderType === "delivery" && d.deliveryAddress ? `<div class="detail-row"><span class="label">Delivery To</span><span class="value" style="text-align:right">${d.deliveryAddress}</span></div>` : ""}
+      </div>
+      <div class="card">
+        <div class="card-title">Items</div>
+        <table class="items-table">
+          <thead><tr><th>Item</th><th style="text-align:center">Qty</th><th style="text-align:right">Price</th></tr></thead>
+          <tbody>${itemRows}</tbody>
+        </table>
+        <div style="border-top:2px solid #e2e8f0;margin-top:15px;padding-top:15px">
+          <div class="total-row"><span>Subtotal</span><span>$${d.subtotal.toFixed(2)}</span></div>
+          ${discountRow}
+          <div class="total-row"><span>Tax</span><span>$${d.taxAmount.toFixed(2)}</span></div>
+          ${deliveryRow}
+          <div class="grand-total"><span>Total</span><span>$${d.total.toFixed(2)}</span></div>
+        </div>
+      </div>
+      ${d.pointsEarned ? `<div class="points">👏 You earned <strong>${d.pointsEarned} loyalty points</strong> on this order!</div>` : ""}
+      <div style="background:#faf5ff;border:1px solid #e9d5ff;padding:20px;text-align:center;margin:20px 0;border-radius:6px">
+        <p style="font-size:14px;color:#7e22ce;margin-bottom:10px"><strong>Track Your Order</strong></p>
+        <a href="https://jagabansla.com/order-confirmation?orderId=${d.orderId}" class="btn">View Status →</a>
+      </div>
+    </div>
+    <div class="footer">
+      <p>Jagabans L.A. Restaurant | 1423 W Pico Blvd, Los Angeles, CA 90015</p>
+      <p style="margin-top:10px">📞 (818) 210-6659 | 📧 info@jagabansla.com</p>
+    </div>
+  </div>
+</body>
+</html>`;
+}
 
-      EdgeRuntime.waitUntil(
-        fetch('https://api.resend.com/emails', {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${resendApiKey}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            from: 'Jagabans L.A. <info@jagabansla.com>',
-            to: [customer_email],
-            subject: `Order Confirmed #${orderNumber} - Jagabans L.A.`,
-            html: emailHtml,
-          }),
-        })
-          .then((r) => console.log('Customer email status:', r.status))
-          .catch((e) => console.error('Customer email error:', e))
+function buildCustomerEmailText(d: OrderEmailData): string {
+  const discountLine = d.discountAmount > 0 ? `Discount:  −$${d.discountAmount.toFixed(2)}\n` : "";
+  const deliveryLine =
+    d.orderType === "delivery" && d.deliveryFee > 0
+      ? `Delivery:  $${d.deliveryFee.toFixed(2)}\n`
+      : "";
+
+  return `ORDER CONFIRMATION #${d.orderNumber}
+
+Thank you, ${d.customerName}!
+
+Order ID: ${d.orderId.substring(0, 8).toUpperCase()}
+Type: ${d.orderType.toUpperCase()}
+${d.orderType === "pickup" && d.pickupNotes ? `Pickup Time: ${d.pickupNotes}\n` : ""}${d.orderType === "delivery" && d.deliveryAddress ? `Delivery Address: ${d.deliveryAddress}\n` : ""}
+ITEMS:
+${d.items.map((i) => `${i.name} ×${i.quantity} ......... $${i.price.toFixed(2)}`).join("\n")}
+
+Subtotal:  $${d.subtotal.toFixed(2)}
+${discountLine}Tax:       $${d.taxAmount.toFixed(2)}
+${deliveryLine}TOTAL:     $${d.total.toFixed(2)}
+${d.pointsEarned ? `\nYou earned ${d.pointsEarned} loyalty points!\n` : ""}
+Track: https://jagabansla.com/order-confirmation?orderId=${d.orderId}
+
+(818) 210-6659 | info@jagabansla.com`;
+}
+
+function buildAdminEmailHtml(d: OrderEmailData): string {
+  const itemRows = d.items
+    .map(
+      (i) =>
+        `<tr>
+          <td style="padding:8px">${i.name}</td>
+          <td style="padding:8px;text-align:center">×${i.quantity}</td>
+          <td style="padding:8px;text-align:right">$${i.price.toFixed(2)}</td>
+        </tr>`
+    )
+    .join("");
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body{font-family:Arial,sans-serif;background:#f4f4f4}
+    .container{max-width:600px;margin:20px auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 4px rgba(0,0,0,.1)}
+    .header{background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;padding:30px;text-align:center}
+    .alert{background:#fffbeb;border-left:4px solid #f59e0b;padding:20px;margin:20px}
+    .detail-row{padding:10px 0;border-bottom:1px solid #e5e7eb;display:flex;justify-content:space-between}
+    .label{font-weight:700;color:#d97706}
+    .items-table{width:calc(100% - 40px);margin:0 20px 20px;border-collapse:collapse}
+    .items-table th{background:#f3f4f6;padding:8px;text-align:left;font-weight:700;border-bottom:2px solid #d97706}
+    .items-table td{padding:8px;border-bottom:1px solid #e5e7eb}
+    .totals{padding:0 20px 20px}
+    .total-row{display:flex;justify-content:space-between;padding:4px 0;color:#6b7280;font-size:14px}
+    .grand{font-weight:700;font-size:16px;color:#d97706;border-top:2px solid #d97706;margin-top:8px;padding-top:8px}
+    .btn{display:inline-block;background:#f59e0b;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;margin:20px;font-weight:700}
+    .footer{background:#f9fafb;padding:20px;text-align:center;color:#6b7280;font-size:12px;border-top:1px solid #e5e7eb}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1 style="margin:0">🔔 New Order Alert</h1>
+      <p style="margin:8px 0 0">#${d.orderNumber}</p>
+    </div>
+    <div class="alert">
+      <div class="detail-row"><span class="label">Customer</span><span>${d.customerName}</span></div>
+      <div class="detail-row"><span class="label">Email</span><span>${d.customerEmail}</span></div>
+      <div class="detail-row"><span class="label">Phone</span><span>${d.customerPhone}</span></div>
+      <div class="detail-row"><span class="label">Type</span><span><strong>${d.orderType === "pickup" ? "🏪 PICKUP" : "🚗 DELIVERY"}</strong></span></div>
+      ${d.orderType === "pickup" && d.pickupNotes ? `<div class="detail-row"><span class="label">Pickup</span><span>${d.pickupNotes}</span></div>` : ""}
+      ${d.orderType === "delivery" && d.deliveryAddress ? `<div class="detail-row"><span class="label">Delivery</span><span>${d.deliveryAddress}</span></div>` : ""}
+      ${d.deliveryInstructions ? `<div class="detail-row" style="flex-direction:column"><span class="label">Instructions</span><span style="margin-top:6px">${d.deliveryInstructions}</span></div>` : ""}
+    </div>
+    <table class="items-table">
+      <thead><tr><th>Item</th><th style="text-align:center">Qty</th><th style="text-align:right">Price</th></tr></thead>
+      <tbody>${itemRows}</tbody>
+    </table>
+    <div class="totals">
+      <div class="total-row"><span>Subtotal</span><span>$${d.subtotal.toFixed(2)}</span></div>
+      ${d.discountAmount > 0 ? `<div class="total-row" style="color:#10b981"><span>Discount</span><span>−$${d.discountAmount.toFixed(2)}</span></div>` : ""}
+      <div class="total-row"><span>Tax</span><span>$${d.taxAmount.toFixed(2)}</span></div>
+      ${d.orderType === "delivery" && d.deliveryFee > 0 ? `<div class="total-row"><span>Delivery Fee</span><span>$${d.deliveryFee.toFixed(2)}</span></div>` : ""}
+      <div class="total-row grand"><span>Total</span><span>$${d.total.toFixed(2)}</span></div>
+    </div>
+    <a href="https://jagabansla.com/admin/dashboard#orders" class="btn">Manage Order →</a>
+    <div class="footer">Jagabans L.A. Admin System — Automated Notification</div>
+  </div>
+</body>
+</html>`;
+}
+
+function buildAdminEmailText(d: OrderEmailData): string {
+  return `🔔 NEW ORDER #${d.orderNumber}
+
+Customer: ${d.customerName}
+Email:    ${d.customerEmail}
+Phone:    ${d.customerPhone}
+Type:     ${d.orderType.toUpperCase()}
+${d.orderType === "pickup" && d.pickupNotes ? `Pickup:   ${d.pickupNotes}\n` : ""}${d.orderType === "delivery" && d.deliveryAddress ? `Delivery: ${d.deliveryAddress}\n` : ""}${d.deliveryInstructions ? `Notes:    ${d.deliveryInstructions}\n` : ""}
+ITEMS:
+${d.items.map((i) => `${i.name} ×${i.quantity} ...... $${i.price.toFixed(2)}`).join("\n")}
+
+Subtotal: $${d.subtotal.toFixed(2)}
+${d.discountAmount > 0 ? `Discount: −$${d.discountAmount.toFixed(2)}\n` : ""}Tax:      $${d.taxAmount.toFixed(2)}
+${d.orderType === "delivery" && d.deliveryFee > 0 ? `Delivery: $${d.deliveryFee.toFixed(2)}\n` : ""}TOTAL:    $${d.total.toFixed(2)}
+
+Manage: https://jagabansla.com/admin/dashboard#orders`;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Main handler
+// ─────────────────────────────────────────────────────────────
+
+console.info("process-square-payment started");
+
+Deno.serve(async (req: Request) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  try {
+    // ── Auth setup ────────────────────────────────────────────────────────
+
+    const authHeader = req.headers.get("Authorization");
+    const hasBearer = !!authHeader && authHeader.toLowerCase().startsWith("bearer ");
+    const skipUserLookup = looksLikeAnonKey(authHeader);
+
+    const supabaseUser = createClient(
+      Deno.env.get("SUPABASE_URL") ?? "",
+      Deno.env.get("SUPABASE_ANON_KEY") ?? "",
+      hasBearer && !skipUserLookup
+        ? { global: { headers: { Authorization: authHeader! } } }
+        : undefined
+    );
+
+    const supabaseAdmin = createClient(
+      Deno.env.get("SUPABASE_URL") ?? "",
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
+    );
+
+    let userId: string | null = null;
+    if (hasBearer && !skipUserLookup) {
+      const { data, error } = await supabaseUser.auth.getUser();
+      if (data?.user && !error) userId = data.user.id;
+    }
+
+    // ── Parse body ────────────────────────────────────────────────────────
+
+    const body: PaymentRequest = await req.json();
+    const {
+      sourceId,
+      amount,
+      subtotal,
+      taxAmount,
+      currency = "USD",
+      customer,
+      items,
+      deliveryQuoteId,
+      deliveryFeeCents: clientDeliveryFeeCents,
+      discountAmount:   clientDiscountCents,
+      customerId,
+    } = body;
+
+    const orderType: "delivery" | "pickup" =
+      body.orderType ?? customer?.deliveryType ?? "delivery";
+
+    const deliveryAddress =
+      body.deliveryAddress ??
+      (orderType === "delivery" && customer?.address
+        ? [customer.address, customer.city, customer.state, customer.zip]
+            .filter(Boolean)
+            .join(", ")
+        : undefined);
+
+    const pickupNotes =
+      body.pickupNotes ??
+      (orderType === "pickup" && (customer?.pickupDate || customer?.pickupTime)
+        ? `${customer.pickupDate ?? ""} ${customer.pickupTime ?? ""}`.trim() || undefined
+        : undefined);
+
+    // ── Basic field validation ────────────────────────────────────────────
+
+    if (!sourceId || typeof sourceId !== "string")
+      return json({ error: "Invalid sourceId" }, 400);
+    if (!Number.isInteger(amount) || amount <= 0)
+      return json({ error: "Invalid amount (must be positive integer cents)" }, 400);
+    if (!Number.isInteger(subtotal) || subtotal <= 0)
+      return json({ error: "Invalid subtotal (must be positive integer cents)" }, 400);
+    if (!Number.isInteger(taxAmount) || taxAmount < 0)
+      return json({ error: "Invalid taxAmount (must be non-negative integer cents)" }, 400);
+    if (!Array.isArray(items) || items.length === 0)
+      return json({ error: "No items" }, 400);
+    if (orderType === "delivery" && !deliveryAddress)
+      return json({ error: "Delivery address required for delivery orders" }, 400);
+    if (orderType === "pickup" && (!customer?.pickupDate || !customer?.pickupTime))
+      return json({ error: "Pickup date and time required for pickup orders" }, 400);
+
+    // ── Fetch app_settings for server-side discount verification ──────────
+    //
+    // The discount must be recomputed server-side from the canonical settings
+    // row. The client figure is only used to detect stale-UI mismatches.
+
+    const { data: configRows, error: configErr } = await supabaseAdmin
+      .from("app_config")
+      .select("key, value")
+      .in("key", ["discount_enabled", "discount_percentage", "points_enabled"]);
+
+    if (configErr) {
+      console.error("app_config fetch failed:", configErr.message);
+      return json({ error: "Could not load discount settings" }, 500);
+    }
+
+    const configMap = Object.fromEntries(
+      (configRows ?? []).map((r) => [r.key, r.value])
+    );
+
+    const serverDiscountEnabled    = configMap["discount_enabled"] === true
+                                  || configMap["discount_enabled"] === "true";
+    const serverDiscountPercentage = Number(configMap["discount_percentage"]) || 10;
+    const serverPointsEnabled      = configMap["points_enabled"] === true
+                                  || configMap["points_enabled"] === "true";
+
+    const effectiveDiscountCents = serverDiscountEnabled
+      ? Math.round((subtotal * serverDiscountPercentage) / 100)
+      : 0;
+
+    // Reject if client discount doesn't match server (±1¢ rounding tolerance)
+    const incomingDiscountCents = clientDiscountCents ?? 0;
+    if (Math.abs(incomingDiscountCents - effectiveDiscountCents) > 1) {
+      console.error(
+        `Discount mismatch: client=${incomingDiscountCents}¢ server=${effectiveDiscountCents}¢ ` +
+        `(enabled=${serverDiscountEnabled} pct=${serverDiscountPercentage})`
+      );
+      return json({ error: "Discount mismatch. Please refresh and try again." }, 400);
+    }
+
+    // ── Pickup delivery fee guard ─────────────────────────────────────────
+    //
+    // Pickup orders must never carry a delivery fee regardless of what the
+    // client sent — catches the in-flight quote race condition and future
+    // client regressions.
+
+    const effectiveDeliveryFeeCents =
+      orderType === "pickup" ? 0 : Math.max(0, clientDeliveryFeeCents ?? 0);
+
+    // ── Server-side amount recomputation ──────────────────────────────────
+    //
+    // Never charge the client-supplied `amount` directly. Recompute from
+    // verified components and reject if the discrepancy exceeds 1¢.
+
+    const discountedSubtotalCents = subtotal - effectiveDiscountCents;
+    const expectedAmount = Math.max(
+      0,
+      discountedSubtotalCents + taxAmount + effectiveDeliveryFeeCents
+    );
+
+    if (Math.abs(amount - expectedAmount) > 1) {
+      console.error(
+        `Amount mismatch: client=${amount}¢ server=${expectedAmount}¢ ` +
+        `(subtotal=${subtotal} discount=${effectiveDiscountCents} tax=${taxAmount} ` +
+        `deliveryFee=${effectiveDeliveryFeeCents} orderType=${orderType})`
+      );
+      return json(
+        {
+          error: "Amount mismatch",
+          message:
+            `Client sent ${amount}¢ but server computed ${expectedAmount}¢. ` +
+            `Please refresh and try again.`,
+        },
+        400
       );
     }
 
-    // ── 8. Background: Uber Direct delivery ───────────────────────────────────
-    if (order_type === 'delivery' && delivery_address) {
-      const uberClientId     = Deno.env.get('UBER_CLIENT_ID');
-      const uberClientSecret = Deno.env.get('UBER_CLIENT_SECRET');
+    // All downstream operations use the server-computed charge amount.
+    const chargeAmount = expectedAmount;
 
-      if (uberClientId && uberClientSecret) {
-        EdgeRuntime.waitUntil((async () => {
-          try {
-            const accessToken = await getUberAccessToken(uberClientId, uberClientSecret);
+    const totalDollars       = +(chargeAmount / 100).toFixed(2);
+    const subtotalDollars    = +(subtotal / 100).toFixed(2);
+    const taxDollars         = +(taxAmount / 100).toFixed(2);
+    const discountDollars    = +(effectiveDiscountCents / 100).toFixed(2);
+    const deliveryFeeDollars = +(effectiveDeliveryFeeCents / 100).toFixed(2);
 
-            const manifestItems = Array.isArray(items) && items.length > 0
-              ? items.map((item: any) => ({ name: item.name, quantity: Number(item.quantity ?? 1) }))
-              : [{ name: `Order ${orderId.substring(0, 8).toUpperCase()}`, quantity: 1 }];
+    // ── Charge Square ─────────────────────────────────────────────────────
 
-            const rawDropoff    = delivery_address_uber || delivery_address;
-            const dropoffAddress = resolveDropoffAddress(rawDropoff);
-            const pickupAddress  = resolvePickupAddress();
+    const squareAccessToken = Deno.env.get("SQUARE_ACCESS_TOKEN");
+    if (!squareAccessToken)
+      return json({ error: "Payment service not configured" }, 500);
 
-            const quoteIdField = uber_quote_id ? { quote_id: uber_quote_id } : {};
+    const squareEnv  = Deno.env.get("SQUARE_ENVIRONMENT") || "sandbox";
+    const squareBase =
+      squareEnv === "production"
+        ? "https://connect.squareup.com"
+        : "https://connect.squareupsandbox.com";
 
-            const deliveryPayload = {
-              ...quoteIdField,
-              external_id:          orderId,
-              pickup_name:          Deno.env.get('RESTAURANT_NAME') || 'Jagabans L.A.',
-              pickup_phone_number:  Deno.env.get('RESTAURANT_PHONE') || '+18182106659',
-              pickup_address:       pickupAddress,
-              pickup_notes:         'Food order ready for pickup',
-              dropoff_name:         customer_name || 'Customer',
-              dropoff_phone_number: customer_phone || '+10000000000',
-              dropoff_address:      dropoffAddress,
-              dropoff_notes:        pickup_notes || '',
-              manifest_items:       manifestItems,
-              pickup_ready_dt:      new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-            };
+    const idempotencyKey = crypto.randomUUID();
+    const sqResp = await fetch(`${squareBase}/v2/payments`, {
+      method: "POST",
+      headers: {
+        "Square-Version": "2024-08-15",
+        Authorization: `Bearer ${squareAccessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        source_id:       sourceId,
+        idempotency_key: idempotencyKey,
+        amount_money:    { amount: chargeAmount, currency },
+        location_id:     Deno.env.get("SQUARE_LOCATION_ID"),
+        ...(customerId ? { customer_id: customerId } : {}),
+        note: customer?.name
+          ? `${orderType === "pickup" ? "Pickup" : "Delivery"} order — ${customer.name}`
+          : undefined,
+      }),
+    });
 
-            const delivery = await createUberDelivery(accessToken, deliveryPayload);
-            console.log('Uber Direct delivery created:', delivery.id, '| status:', delivery.status);
+    const sqData = await sqResp.json();
+    if (!sqResp.ok || !sqData?.payment)
+      return json(
+        { error: sqData?.errors?.[0]?.detail || "Payment failed", details: sqData?.errors },
+        400
+      );
 
-            await supabase
-              .from('orders')
-              .update({
-                uber_delivery_id:      delivery.id,
-                uber_delivery_status:  delivery.status,
-                uber_tracking_url:     delivery.tracking_url ?? null,
-                uber_delivery_eta:     delivery.dropoff_eta ?? null,
-                delivery_provider:     'uber',
-                delivery_triggered_at: new Date().toISOString(),
-                cancellation_deadline: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-                updated_at:            new Date().toISOString(),
-              })
-              .eq('id', orderId);
+    const payment = sqData.payment;
 
-            console.log('Order updated with Uber delivery info');
-          } catch (uberErr) {
-            console.error('Uber Direct error (non-fatal):', uberErr instanceof Error ? uberErr.message : uberErr);
-          }
-        })());
-      } else {
-        console.warn('UBER credentials not set — delivery dispatch skipped for order:', orderId);
+    // ── Status maps ───────────────────────────────────────────────────────
+
+    const sqStatusMap: Record<string, "pending" | "succeeded" | "failed" | "refunded" | "canceled"> = {
+      COMPLETED: "succeeded",
+      APPROVED:  "pending",
+      CANCELED:  "canceled",
+      FAILED:    "failed",
+      REFUNDED:  "refunded",
+    };
+
+    const ordersPaymentStatusMap: Record<string, "pending" | "processing" | "succeeded" | "failed" | "canceled"> = {
+      COMPLETED: "succeeded",
+      APPROVED:  "processing",
+      CANCELED:  "canceled",
+      FAILED:    "failed",
+      REFUNDED:  "succeeded",
+    };
+
+    const sqPaymentStatus     = sqStatusMap[payment.status as string]            ?? "pending";
+    const ordersPaymentStatus = ordersPaymentStatusMap[payment.status as string] ?? "pending";
+
+    // ── Persist square_payments ───────────────────────────────────────────
+
+    const { data: paymentRow, error: payErr } = await supabaseAdmin
+      .from("square_payments")
+      .insert({
+        user_id:           userId,
+        order_id:          null as string | null,
+        square_payment_id: payment.id as string,
+        square_order_id:   payment.order_id ?? null,
+        amount:            totalDollars,
+        currency,
+        status:            sqPaymentStatus,
+        payment_method:    payment.card_details?.card?.card_brand ?? null,
+        receipt_url:       payment.receipt_url ?? null,
+        error_message:     null as string | null,
+        metadata: {
+          customer,
+          items,
+          orderType,
+          discountAmount: discountDollars,
+          deliveryFee:    deliveryFeeDollars,
+        } as unknown,
+      })
+      .select("id, status, receipt_url")
+      .single();
+
+    if (payErr) {
+      console.error("square_payments insert failed:", payErr);
+      return json({ error: "Failed to save payment", details: payErr }, 400);
+    }
+
+    // ── Persist order ─────────────────────────────────────────────────────
+
+    // Points are earned on the post-discount food subtotal only —
+    // tax and delivery fee are excluded from the reward base.
+    const pointsEarned = (userId && serverPointsEnabled) ? Math.floor(discountedSubtotalCents / 100) : 0;
+    const customerName = deriveCustomerName(body, payment);
+
+    const { data: orderRow, error: orderErr } = await supabaseAdmin
+      .from("orders")
+      .insert({
+        user_id:           userId,
+        total:             totalDollars,
+        subtotal:          subtotalDollars,
+        tax:               taxDollars,
+        discount:   discountDollars,
+        points_earned:     pointsEarned,
+        status:            "pending",
+        order_type:        orderType,
+        delivery_address:  orderType === "delivery" ? deliveryAddress : null,
+        pickup_notes:      orderType === "pickup"   ? pickupNotes     : null,
+        payment_id:        sourceId,
+        customer_name:     customerName ?? null,
+        payment_status:    ordersPaymentStatus,
+        delivery_provider: orderType === "delivery" ? "uber" : null,
+        delivery_fee:      deliveryFeeDollars,
+      })
+      .select("id, order_number")
+      .single();
+
+    if (orderErr) {
+      await supabaseAdmin
+        .from("square_payments")
+        .update({ error_message: "Order insert failed" })
+        .eq("id", paymentRow.id);
+      console.error("orders insert failed:", orderErr);
+      return json({ error: "Failed to save order", details: orderErr }, 400);
+    }
+
+    await supabaseAdmin
+      .from("square_payments")
+      .update({ order_id: orderRow.id })
+      .eq("id", paymentRow.id);
+
+    // ── Persist order_items ───────────────────────────────────────────────
+
+    const { error: itemsErr } = await supabaseAdmin.from("order_items").insert(
+      items.map((i) => ({
+        order_id:     orderRow.id,
+        menu_item_id: isNaN(Number(i.id)) ? null : Number(i.id),
+        name:         i.name,
+        quantity:     i.quantity,
+        price:        +(+i.price).toFixed(2),
+      }))
+    );
+    if (itemsErr) {
+      await supabaseAdmin
+        .from("square_payments")
+        .update({ error_message: "Order items insert failed" })
+        .eq("id", paymentRow.id);
+      console.error("order_items insert failed:", itemsErr);
+    }
+
+    // ── Loyalty points + notification ─────────────────────────────────────
+
+    if (userId && pointsEarned > 0) {
+      const { error: ptsErr } = await supabaseAdmin.rpc("increment_user_points", {
+        user_id_param: userId,
+        points_to_add: pointsEarned,
+      });
+      if (ptsErr) console.error("increment_user_points failed:", ptsErr);
+
+      await supabaseAdmin.from("notifications").insert({
+        user_id: userId,
+        title:   "Order Placed Successfully",
+        message: `Your ${orderType} order #${orderRow.order_number} has been placed. You earned ${pointsEarned} points!`,
+        type:    "order",
+        read:    false,
+      });
+    }
+
+    // ── Uber Direct dispatch ──────────────────────────────────────────────
+
+    let trackingUrl: string | null           = null;
+    let deliveryId:  string | null           = null;
+    let deliveryDispatchError: string | null = null;
+
+    if (orderType === "delivery" && deliveryAddress) {
+      try {
+        const uberResult = await dispatchUberDelivery(
+          orderRow.id,
+          items,
+          customer,
+          deliveryQuoteId
+        );
+        trackingUrl = uberResult.trackingUrl;
+        deliveryId  = uberResult.deliveryId;
+
+        await supabaseAdmin
+          .from("orders")
+          .update({
+            uber_delivery_id:      deliveryId,
+            uber_tracking_url:     trackingUrl,
+            uber_delivery_status:  uberResult.status,
+            delivery_triggered_at: new Date().toISOString(),
+          })
+          .eq("id", orderRow.id);
+
+        console.log(`✅ Uber delivery dispatched: ${deliveryId}`);
+      } catch (uberErr) {
+        const msg = uberErr instanceof Error ? uberErr.message : "Dispatch failed";
+        deliveryDispatchError = msg;
+        console.error("❌ Uber dispatch failed:", msg);
+
+        await supabaseAdmin
+          .from("orders")
+          .update({ uber_delivery_status: "dispatch_failed" })
+          .eq("id", orderRow.id);
       }
     }
 
-    console.log(`Square payment processed in ${Date.now() - startTime}ms | order: ${orderId}`);
+    // ── Emails ────────────────────────────────────────────────────────────
 
-    return new Response(
-      JSON.stringify({ success: true, orderId, paymentId }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    );
+    const emailData: OrderEmailData = {
+      customerName:         customer.name,
+      customerEmail:        customer.email,
+      customerPhone:        customer.phone ?? "Not provided",
+      orderNumber:          orderRow.order_number.toString(),
+      orderId:              orderRow.id,
+      orderType,
+      subtotal:             subtotalDollars,
+      discountAmount:       discountDollars,
+      taxAmount:            taxDollars,
+      deliveryFee:          deliveryFeeDollars,
+      total:                totalDollars,
+      items,
+      pickupNotes:          orderType === "pickup"   ? pickupNotes     : undefined,
+      deliveryAddress:      orderType === "delivery" ? deliveryAddress : undefined,
+      deliveryInstructions: customer.deliveryInstructions,
+      pointsEarned,
+    };
 
-  } catch (err: any) {
-    console.error('process-square-payment error:', err?.message ?? err);
-    return new Response(
-      JSON.stringify({ error: err?.message ?? 'Payment processing failed' }),
-      { status: 500, headers: corsHeaders }
-    );
+    await sendEmail(
+      customer.email,
+      `Order Confirmation #${orderRow.order_number} — Jagabans L.A.`,
+      buildCustomerEmailHtml(emailData),
+      buildCustomerEmailText(emailData)
+    ).catch((e) => console.error("Customer email failed:", e));
+
+    const adminEmail = Deno.env.get("RESTAURANT_EMAIL") ?? "";
+    if (adminEmail && adminEmail !== customer.email) {
+      await sendEmail(
+        adminEmail,
+        `🔔 New Order #${orderRow.order_number} — ${customer.name}`,
+        buildAdminEmailHtml(emailData),
+        buildAdminEmailText(emailData)
+      ).catch((e) => console.error("Admin email failed:", e));
+    }
+
+    // ── Response ──────────────────────────────────────────────────────────
+
+    return json({
+      success:               true,
+      orderId:               orderRow.id,
+      orderNumber:           orderRow.order_number,
+      paymentId:             payment.id,
+      orderStatus:           payment.status,
+      pointsEarned,
+      mode:                  userId ? "user" : "guest",
+      skipped_user_lookup:   skipUserLookup,
+      trackingUrl,
+      deliveryId,
+      deliveryDispatchError,
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    console.error("Unhandled error:", message);
+    return json({ error: "Internal server error", message }, 500);
   }
 });
